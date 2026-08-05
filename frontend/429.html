@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}
+429 Too Many Requests
+{% endblock %}
+
+{% block main %}
+  Error 429 Too Many Requests
+
+  <p>{{ (err_reason) and err_reason or "You are being rate limited. Please wait a few seconds :)" }}</p>
+{% endblock %}

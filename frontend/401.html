@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}
+Unauthorized
+{% endblock %}
+
+{% block main %}
+  Error 401 Unauthorized
+
+  <p>{{ (err_reason) and err_reason or "Not allowed to this page" }}</p>
+{% endblock %}

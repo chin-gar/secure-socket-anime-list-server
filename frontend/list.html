@@ -1,0 +1,110 @@
+{% extends "layout.html" %}
+
+{% block title %}
+List
+{% endblock %}
+
+{% block additional_head %}
+<style type="text/tailwindcss">
+  .pg-nav-arr {
+      @apply bg-pink-200 rounded-lg outline outline-white cursor-pointer size-12 hover:fill-white p-2;
+  }
+</style>
+<script src="search.js" defer></script>
+<script>
+  function changeEpWatched(anime_id, element) {
+      fetch("/epwatched", {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: new URLSearchParams({anime_id: anime_id, ep_watched: element.value})
+        }).then(async(response) => {
+            console.log(await response.json())
+            if (response.ok) {
+                const epWatched = document.getElementById("epWatched"+anime_id);
+                const slash = epWatched.textContent.indexOf('/');
+                epWatched.textContent = element.value + epWatched.textContent.substring(slash != -1 ? slash : epWatched.textContent.indexOf(' '));
+                epWatched.parentElement.querySelector("progress").value = element.value;
+            }
+        });
+    }
+  document.addEventListener('DOMContentLoaded', function() {
+    let url = new URL(window.location.href);
+    const page = Math.max(1, parseInt(url.searchParams.get("page"))) || 1;
+
+    url.searchParams.set("page", Math.max(page - 1, 1));
+    document.getElementById("prev").href = url.pathname + url.search;
+
+    url.searchParams.set("page", page + 1);
+    document.getElementById("next").href = url.pathname + url.search;
+  })
+</script>
+{% endblock %}
+
+{% block main %}
+  <br>
+  {% if list_err %}
+    <div class="w-full h-16 bg-red-200 outline outline-white">
+      Error: {{ list_err }}
+    </div>
+  {% endif %}
+
+  <form class="flex w-full place-content-center" action="/list">
+    <input name="q" class="bg-white rounded-lg p-2 w-1/2 shadow-md" type="text" placeholder="Max: 300 characters" max="300">
+    <input name="page" type="hidden" value="1">
+    <button class="bg-pink-100 dark:bg-red-200 hover:bg-pink-400 dark:hover:bg-red-400 hover:text-white rounded-lg aspect-square cursor-pointer p-2 ml-2" type="submit">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-6">
+      <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+      </svg>
+    </button>
+  </form>
+
+  <div class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] grid-flow-row-dense auto-rows-auto gap-6 p-6">
+    {% if #list > 0 %}
+      {% for entry in list %}
+          <div class="bg-white/75 dark:bg-linear-to-tl dark:from-red-500/40 dark:to-red-300/30 rounded-lg w-50 outline outline-white h-fit">
+            <img class="rounded-sm" src={{ entry.data.attributes.posterImage.small }} title={{ "~"..entry.data.attributes.episodeLength.." mins per episode\nStarted: "..entry.data.attributes.startDate.."\n"..(entry.data.attributes.endDate and "Ended: "..entry.data.attributes.endDate.."\n" or "").."Status: "..entry.data.attributes.status.."\n\nDescription: "..entry.data.attributes.description }}>
+            <div class="p-2 h-28 flex flex-col place-content-center">
+              <h1 id={{ entry.data.id.."Title" }} class="w-full text-center text-md text-ellipsis overflow-hidden mb-1" style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;">
+                {{ (entry.data.attributes.titles.en and entry.data.attributes.titles.en:match("^%s*$") == nil and entry.data.attributes.titles.en ~= "\"\"") and entry.data.attributes.titles.en or (entry.data.attributes.titles.en_us) and entry.data.attributes.titles.en_us or (entry.data.attributes.titles.en_jp) and entry.data.attributes.titles.en_jp or entry.data.attributes.titles.en_cn }}
+              </h1>
+              <p class="w-full text-center text-sm">{{ entry.data.attributes.averageRating and "Rating: "..entry.data.attributes.averageRating.."%" or "No ratings" }}</p>
+            </div>
+            <div class="w-full h-12 relative flex justify-center">
+              <progress class="w-full h-full absolute" min="0" max={{ entry.data.attributes.episodeCount }} value={{ entry.episodesWatched }}></progress>
+              <p id={{ "epWatched"..entry.data.id }} class="w-full h-full absolute text-center text-sm content-center">{{ entry.episodesWatched }}{{ entry.data.attributes.episodeCount and "/"..entry.data.attributes.episodeCount }} episode{{ entry.data.attributes.episodeCount > 1 and "s" }} watched</p>
+            </div>
+            <div class="place-content-center">
+              <p class="bg-pink-200 p-1 text-center">Set episodes watched:</p>
+              <input class="bg-pink-100 w-full text-center" type="number" onchange={{ "changeEpWatched("..entry.data.id..", this)" }} value={{ entry.episodesWatched }}>
+            </div>
+            <button id={{ "addRm"..entry.data.id }} onclick={{ "rmFromList("..entry.data.id..")" }} class="rounded-bl-lg rounded-br-lg w-full flex flex-row justify-evenly p-2 cursor-pointer bg-red-400/75">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
+                <path fill-rule="evenodd" d="M4.25 12a.75.75 0 0 1 .75-.75h14a.75.75 0 0 1 0 1.5H5a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd" />
+              </svg>
+              <p class="mr-4">Remove from list</p>
+            </button>
+          </div>
+      {% endfor %}
+    {% else %}
+      <p>Nothing found :(</p>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block footer %}
+<div class="w-full p-16 flex justify-around items-center">
+  <a id="prev">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="pg-nav-arr">
+      <path fill-rule="evenodd" d="M11.03 3.97a.75.75 0 0 1 0 1.06l-6.22 6.22H21a.75.75 0 0 1 0 1.5H4.81l6.22 6.22a.75.75 0 1 1-1.06 1.06l-7.5-7.5a.75.75 0 0 1 0-1.06l7.5-7.5a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd" />
+    </svg>
+  </a>
+  <h1>Page {{ page or 1 }}</h1>
+  <a id="next">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="pg-nav-arr">
+      <path fill-rule="evenodd" d="M12.97 3.97a.75.75 0 0 1 1.06 0l7.5 7.5a.75.75 0 0 1 0 1.06l-7.5 7.5a.75.75 0 1 1-1.06-1.06l6.22-6.22H3a.75.75 0 0 1 0-1.5h16.19l-6.22-6.22a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
+    </svg>
+  </a>
+</div>
+{% endblock %}

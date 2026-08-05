@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}
+500 Internal Server Error
+{% endblock %}
+
+{% block main %}
+  Error 500 Internal Server Error
+
+  <p>{{ (err_reason) and err_reason or "Something's wrong with the server right now. Check in later." }}</p>
+{% endblock %}

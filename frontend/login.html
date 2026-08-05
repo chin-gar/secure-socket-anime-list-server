@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+
+{% block title %}
+Login
+{% endblock %}
+
+{% block main %}
+<div class="w-full h-full flex place-content-center mt-20">
+  <form action="/login" method="POST" class="w-1/4 p-8 bg-white/75 rounded-3xl outline outline-white h-fit">
+    <h1 class="text-2xl mb-8 w-full text-center">Log In</h1>
+    <label>Username</label>
+    <input name="username" class={{ (username_err and 'outline outline-red-400' or '') .. " bg-white rounded-lg p-2 w-full shadow-md mt-1 mb-4 " }} type="text" min="1" max="20" value={{ username }}>
+    <label class={{ invalid and "text-red-500" }}>{{ invalid and invalid or "Password" }}</label>
+    <input name="pwd" class={{ (invalid and 'outline outline-red-400' or '') .. " bg-white rounded-lg p-2 w-full shadow-md mt-1 mb-4 " }} type="password" min="15" value="">
+    <button class="bg-linear-to-b from-red-200/30 dark:from-red-400/30 to-red-300/50 dark:to-red-600/40 hover:bg-pink-200 dark:hover:bg-red-200 hover:text-white rounded-lg cursor-pointer p-2 w-full shadow-md outline outline-pink-100" type="submit">
+      Login
+    </button>
+    <p class="text-red-500 text-center mt-4 text-lg">{{ server_err and server_err }}</p>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}
+400 Bad Request
+{% endblock %}
+
+{% block main %}
+  Error 400 Bad Request
+
+  <p>{{ (err_reason) and err_reason or "Malformed request" }}</p>
+{% endblock %}

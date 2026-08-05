@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="">
+  <head>
+    {% block head %}
+      <meta charset="utf-8">
+      <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+      <title>{% block title %}Secure Socket Anime List{% endblock %}</title>
+    {% endblock %}
+    {% block additional_head %}
+    {% endblock %}
+  </head>
+  <body class="bg-white bg-radial-[at_25%_50%] from-pink-200 dark:from-pink-300 dark:bg-gray-900 w-screen h-screen flex flex-col max-w-[stretch]">
+    <header class="p-5">
+      <nav class="flex text-xl p-5 gap-5 rounded-lg justify-between items-center bg-linear-to-b from-pink-100 dark:from-red-300 to-pink-300 dark:to-pink-900 outline outline-pink-200 dark:outline-red-800 backdrop-blur-3xl shadow-xl">
+        <a href="/">Home</a>
+        <form class="flex flex-1" action="/search">
+          <input name="filter[text]" class="bg-white rounded-lg p-2 flex-1 shadow-md" type="text" placeholder="Search for a title! Max: 300 characters" max="300">
+          <input name="page[limit]" type="hidden" value="20">
+          <input name="page[offset]" type="hidden" value="20">
+          <button class="bg-pink-100 dark:bg-red-200 hover:bg-pink-400 dark:hover:bg-red-400 hover:text-white rounded-lg aspect-square cursor-pointer p-2 ml-2" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-6">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+          </button>
+        </form>
+        <div class="flex gap-5">
+          {% if session or (set_session and set_session ~= "") %}
+            <button class="w-35 h-10 cursor-pointer rounded-lg hover:text-white"><a href="/list">My List</a></button>
+            <form action="/logout" method="POST">
+              <button class="w-35 h-10 cursor-pointer rounded-lg hover:text-white" type="submit">Log Out</button>
+            </form>
+          {% else %}
+            <button class="w-35 h-10 cursor-pointer rounded-lg hover:text-white"><a href="/signup">Sign Up</a></button>
+            <button class="w-35 h-10 cursor-pointer rounded-lg hover:text-white"><a href="/login">Log In</a></button>
+          {% endif %}
+        </div>
+      </nav>
+    </header>
+    <main class="flex-1">
+      {% block main %}{% endblock %}
+    </main>
+    <footer>
+      {% block footer %}{% endblock %}
+      <p class="w-full text-center mb-4">Anime data provided by <a class="underline" href="https://kitsu.io">kitsu.io</a></p>
+    </footer>
+</html>

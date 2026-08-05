@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}
+404 Not Found
+{% endblock %}
+
+{% block main %}
+  Error 404 Not Found
+
+  <p>{{ (err_reason) and err_reason or "Unknown page" }}</p>
+{% endblock %}
