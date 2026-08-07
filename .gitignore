@@ -1,3 +1,6 @@
 /src/server
 *.db
 .env
+*.crt
+*.pem
+*.key
