@@ -38,7 +38,7 @@ As for the template engine, I just couldn't find a C HTML template engine that w
     - SameSite=Lax &rarr; mitigate CSRF (Cross-Site Request Forging); harder for a malicious site to trick user into performing sensitive POST actions by not sending the cookie
     - Secure &rarr; cookies sent over HTTPS
 - IP-based rate limiting using the Token Bucket Algorithm and a resizable array of unique IPs stored in the server's memory &rarr; mitigate request spamming & resource exhaustion (haven't tested w/ multiple clients yet)
-- (Must revise) Limiting user input of URLs
+- Limiting user input of URLs to 2000 characters, 300 for anime title queries to reduce external Kitsu.io API calls
 - Checking for and displaying different HTTP error codes as HTML pages (ex. 404 Not Found page)
 
 # Installation
