@@ -63,7 +63,7 @@ struct ip_entries_as_func_param {
     int *num_ips_ptr;
 };
 
-typedef struct connection { // NOTE: Made to implement token bucket and pass properties such as ip addr and port, replaced client fd as handle param and is events[i].data.ptr
+typedef struct connection { // NOTE: Made to implement token bucket and pass properties such as ip addr and port
     int fd;
     uint16_t port; // NOTE: 2^16 = 65536 ports, including port 0
     struct ip_entry *entry_ptr;
@@ -138,14 +138,16 @@ char *http_req(const char *path, const char *host, const char *type, const char 
 }
 
 void close_conn(connection *conn) {
-    if (!conn) return;
+    if (!conn || !conn->entry_ptr) return;
     conn->entry_ptr->active_connections--;
     fd_size--;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     close(conn->fd);
-    SSL_shutdown(conn->ssl);
-    SSL_free(conn->ssl);
-    conn->ssl = NULL;
+    if (conn->ssl) {
+        SSL_shutdown(conn->ssl);
+        SSL_free(conn->ssl);
+        conn->ssl = NULL;
+    }
     free(conn);
     conn = NULL;
 }
@@ -154,7 +156,6 @@ void completely_send(connection *conn, const char *buf, const size_t len) {
     size_t sent = 0, total = 0;
     while (total < len) {
         int status = SSL_write_ex(conn->ssl, &buf[total], len - total, &sent);
-        //printf("buf: %s\n", &buf[total]);
         if (status > 0) {
             total += sent;
             continue;
@@ -252,7 +253,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
 }
 
 // NOTE: Must be freed
-char *http_res(void *body, char *type, int content_len, int status, char *more_header_info) {
+char *http_res(const void *body, const char *type, const int content_len, int status, const char *more_header_info) {
     if (status <= 0) status = 200;
     if (more_header_info == NULL) more_header_info = "";
 
@@ -289,7 +290,7 @@ char *http_res(void *body, char *type, int content_len, int status, char *more_h
 
 // TODO: Determine if func needs to return int status code & if args[0] should become pair * & for no params to have to call NULL
 // NOTE: args[0] = pair[]
-void send_file_to(connection *conn, char *name, char *type, int num_args, ...) {
+void send_file_to(connection *conn, const char *name, const char *type, const int num_args, ...) {
     va_list args;
     va_start(args, num_args);
 
@@ -358,21 +359,6 @@ char *url_from_get_req(const char *req) {
     return ex ? strndup(start, strlen(start) - strlen(ex)) : NULL;
 }
 
-int key_exists_in_arr_pairs(const char *key, int param_count, pair *params) {
-    for (int i = 0; i < param_count; i++) {
-        if (params[i].key && strcmp(params[i].key, key) == 0) return 1;
-    }
-    return 0;
-}
-
-int safely_append_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params) {
-    if (key_exists_in_arr_pairs(key, *len_ptr, params)) return 0;
-    if (!(params[*len_ptr].key = strdup(key)) || !(val && (params[*len_ptr].value = strdup(val)))) return -1;
-    if (!val) params[*len_ptr].value = NULL;
-    (*len_ptr)++;
-    return 1;
-}
-
 int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
     if (strcmp(query_str, "") == 0 || strcmp(query_str, "/") == 0 || !strchr(query_str, '=')) return 0;
     const char *question_marker = strchr(query_str, '?');
@@ -402,9 +388,8 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
         }
         if (building_key == 0 && temp[0].key && (i == n - 1 || queries[i] == '&')) {
             if (i == n - 1) {
-                // TODO: Reduce redundancy by revising append() func and maybe put that in sp. custom string helper library?
-                size_t built_len = strlen(built);
-                if (snprintf(built + built_len, sizeof(built) - built_len, "%c", queries[i]) < 0) {
+                char ch = queries[i];
+                if (!append(built, &ch, strlen(built) + 2)) {
                     err(__FILE__, __LINE__, queries, 0);
                     free(temp[0].key);
                     free(temp[0].value);
@@ -426,8 +411,8 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
             modified_temp = 1;
         }
         if (modified_temp == 0) {
-            size_t built_len = strlen(built);
-            if (snprintf(built + built_len, sizeof(built) - built_len, "%c", queries[i]) < 0) {
+            char ch = queries[i];
+            if (!append(built, &ch, strlen(built) + 2)) {
                 err(__FILE__, __LINE__, queries, 0);
                 free(temp[0].key);
                 free(temp[0].value);
@@ -446,7 +431,7 @@ int min(int a, int b) {
 }
 
 // NOTE: 1 if consumed, 0 if ran out
-int consume_bucket(connection *conn, int num_tokens_to_consume) {
+int consume_bucket(connection *conn, const int num_tokens_to_consume) {
     struct token_bucket *bucket = &conn->entry_ptr->bucket;
     time_t now;
     time(&now);
@@ -497,13 +482,12 @@ void *rm_expired_sessions(void *arg) { // NOTE: arg = ip_entry[]
 
 void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     connection *conn = (connection *) arg;
-    const int cli = conn->fd;
     SSL *ssl = conn->ssl;
 
-    if (!ssl || (ssl && SSL_get_fd(ssl) < 0)) {
-        close_conn(conn);
-        return NULL;
-    }
+    // if (!ssl || (ssl && SSL_get_fd(ssl) < 0)) {
+    //     close_conn(conn);
+    //     return NULL;
+    // }
 
     char r[MAX_HTTP_SIZE + 1];
     r[0] = '\0';
@@ -552,7 +536,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 err(__FILE__, __LINE__, NULL, 0);
                 safely_append_into_arr_pair("err_reason", "Cannot fetch session right now", &num_params, params);
                 send_file_to(conn, "500.html", NULL, num_params, params);
-                close_conn(conn);
                 goto done;
             }
         }
@@ -571,7 +554,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             sqlite3_finalize(stmt);
             sqlite3_close(db);
             send_file_to(conn, "500.html", NULL, num_params, params);
-            close_conn(conn);
             goto done;
         };
         if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -599,7 +581,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
                 send_file_to(conn, "500.html", NULL, num_params, params);
-                close_conn(conn);
                 goto done;
             }
             sqlite3_step(stmt);
@@ -609,7 +590,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
                 send_file_to(conn, "500.html", NULL, num_params, params);
-                close_conn(conn);
                 goto done;
             }
         }
@@ -622,8 +602,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
         char val[43 + num_digits(URL_CHAR_LIMIT) + 1];
         safely_append_into_arr_pair("err_reason", snprintf(val, sizeof(val), "Invalid URL or URL exceeds %i character limit", URL_CHAR_LIMIT) >= 0 ? val : "Invalid URL but can't fetch character limit", &num_params, params);
         send_file_to(conn, "404.html", NULL, num_params, params);
-
-        close_conn(conn);
         goto done;
     }
     if (strncmp(r, "GET ", 4) == 0) {
@@ -653,7 +631,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             char *title = NULL;
             int t_len_exceeded = -1;
             if (!(title = search_keys_val_in("filter[text]", num_params, params)) || (t_len_exceeded = (strlen(title) > 300))) {
-                if (t_len_exceeded) safely_append_into_arr_pair("err_reason", "Title is too long", &num_params, params);
+                printf("title: %s\n", title);
+                if (t_len_exceeded == 1) safely_append_into_arr_pair("err_reason", "Title is too long", &num_params, params);
                 send_file_to(conn, "400.html", NULL, num_params, params);
                 goto done;
             }
@@ -674,7 +653,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             if (!params[num_params - 1].key) {
                 err(__FILE__, __LINE__, NULL, 0);
                 send_file_to(conn, "500.html", NULL, num_params, params);
-                close_conn(conn);
                 goto done;
             }
 
@@ -688,7 +666,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     } else send_file_to(conn, "search.html", NULL, num_params, params);
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
-                    close_conn(conn);
                     goto done;
                 }
 
@@ -1218,11 +1195,12 @@ int main(void) {
                     if (ssl) {
                         SSL_shutdown(ssl);
                         SSL_free(ssl);
+                        ssl = NULL;
                     }
                     continue;
                 }
-                SSL_set_fd(ssl, cli);
                 fcntl(cli, F_SETFL, O_NONBLOCK);
+                SSL_set_fd(ssl, cli);
 
                 struct connection *c = malloc(sizeof(connection));
                 int acc = 0, cancel_cli = 0;
@@ -1235,18 +1213,13 @@ int main(void) {
                         cancel_cli = 1;
                         break;
                     }
-                };
-                if (cancel_cli) {
-                    close(cli);
-                    SSL_shutdown(ssl);
-                    SSL_free(ssl);
-                    continue;
                 }
-                if (!c) {
-                    err(__FILE__, __LINE__, NULL, 0);
+                if (cancel_cli || !c) {
+                    if (!cancel_cli) err(__FILE__, __LINE__, NULL, 0);
                     close(cli);
                     SSL_shutdown(ssl);
                     SSL_free(ssl);
+                    ssl = NULL;
                     continue;
                 }
                 c->fd = cli;

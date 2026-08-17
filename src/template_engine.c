@@ -1,3 +1,5 @@
+#include <errno.h>
+
 #include <json-c/json.h>
 #include <json-c/json_object.h>
 #include <json-c/json_tokener.h>
@@ -47,8 +49,12 @@ typedef struct stack_node {
     struct stack_node *next;
 } stack_node;
 
+node **blocks;
+int num_blocks = 0;
+
 void free_node_tree(node *root) {
-    if (root->content) free(root->content);
+    if (!root) return;
+    free(root->content);
     if (root->children) {
         for (int i = 0, n = root->num_children; i < n; i++) {
             free_node_tree(root->children[i]);
@@ -63,41 +69,33 @@ void free_node_tree(node *root) {
 }
 
 void free_stack(stack_node *stack) {
-    while (stack != NULL) {
+    while (stack) {
         stack_node *tmp = stack->next;
         free(stack);
         stack = tmp;
     }
 }
 
-// TODO: Int status code? Also start reading only reading one char at a time?
-void decode(char *url) {
-    char backup[strlen(url) + 1];
-    strcpy(backup, url);
-    for (int i = 0, n = strlen(url); i < n; i++) if (url[i] == '+') url[i] = ' ';
-    for (int i = 0, n = num_char_occurences(url, '%'); i < n; i++) {
-        int sub = strchr(url, '%') - url;
-        char hex[3], *end;
-        strncpy(hex, url + sub + 1, 2);
-        hex[2] = '\0';
-        int decoded = strtol(hex, &end, 16);
-        if (*end != '\0' || end == hex || strlen(hex) < 2) {
-            continue;
+int decode(char *encoded) {
+    if (!encoded) return 0;
+    char backup[strlen(encoded) + 1];
+    strlcpy(backup, encoded, sizeof(backup));
+    for (int i = 0; i < strlen(encoded); i++) { // Ok to call strlen(encoded) multiple times bc dynamic resizing
+        if (encoded[i] == '+')
+            encoded[i] = ' ';
+        else if (encoded[i] == '%') {
+            char hex[3], *end;
+            strlcpy(hex, &encoded[i + 1], 3);
+            int decoded = strtol(hex, &end, 16);
+            if (*end != '\0' || end == hex || strlen(hex) < 2) {
+                strlcpy(encoded, backup, sizeof(backup));
+                return 0;
+            }
+            encoded[i] = decoded;
+            memmove(&encoded[i + 1], &encoded[i + 3], strlen(encoded) - 2);
         }
-
-        char *first = strndup(url, sub);
-        char *last = strndup(url + sub + 3, strlen(url) - sub + 1);
-        if (first == NULL || last == NULL) {
-            if (first) free(first);
-            if (last) free(last);
-            strcpy(url, backup);
-            return;
-        }
-
-        sprintf(url, "%s%c%s", first, decoded, last);
-        free(first);
-        free(last);
     }
+    return 1;
 }
 
 long int f_size(FILE * file) {
@@ -106,12 +104,6 @@ long int f_size(FILE * file) {
     long int s = ftell(file);
     fseek(file, 0L, orig_pos);
     return s;
-}
-
-int num_char_occurences(const char *str, char c) {
-    int count = 0;
-    for (int i = 0, n = strlen(str); i < n; i++) if (str[i] == c) count++;
-    return count;
 }
 
 int num_digits(int num) {
@@ -123,18 +115,15 @@ int num_digits(int num) {
     return digits > 1 ? digits : 1;
 }
 
-
-void err(char *file, int line, void *heap_obj, int exit_prog) {
-    if (heap_obj) free(heap_obj);
-    char msg[strlen(file) + num_digits(line) + 1];
-    sprintf(msg, "%s:%i", file, line);
-    perror(msg);
+void err(const char *file, const int line, void *heap_obj, const int exit_prog) {
+    free(heap_obj);
+    printf("%s:%i: %s\n", file, line, strerror(errno)); // perror w/ snprintf msg adds minor but unnecessary complication of error handling snprintf
     if (exit_prog > 0) exit(EXIT_FAILURE);
 }
 
 char *sanitize(const char *str) {
     char *clean = malloc(1);
-    if (clean == NULL) {
+    if (!clean) {
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
@@ -144,32 +133,24 @@ char *sanitize(const char *str) {
             case '\0':
                 continue;
             default:
-                clean = realloc(clean, strlen(clean) + 3 + num_digits(str[i]) + 1);
-                if (clean == NULL) {
+                size_t added_bytes = str[i] >= 0 ? 3 + num_digits(str[i]) : 1;
+                clean = realloc(clean, strlen(clean) + added_bytes + 1);
+                if (!clean || (str[i] >= 0 ? snprintf(clean + strlen(clean), added_bytes + 1, "&#%i", str[i]) < 0 : snprintf(clean + strlen(clean), 2, "%c", str[i]) < 0)) {
                     err(__FILE__, __LINE__, clean, 0);
                     return NULL;
                 }
-                if (str[i] >= 0)
-                    sprintf(clean, "%s&#%i;", clean, str[i]);
-                else sprintf(clean, "%s%c", clean, str[i]);
         }
     }
     return clean;
-}
-
-// NOTE: end = exclusive
-int len_btwn(const char *str, const char *end) {
-    const char *s = strstr(str, end);
-    return strlen(str) - strlen(s ? s : "");
 }
 
 // NOTE: Uses linear search --> O(n), must be freed
 char *search_keys_val_in(const char *key, int param_count, pair *params) {
     for (int i = 0; i < param_count; i++) {
         if (params[i].key && strcmp(params[i].key, key) == 0) {
-            char *val = strdup(params[i].value);
-            if (val == NULL) {
-                err(__FILE__, __LINE__, val, 0);
+            char *val = NULL;
+            if (params[i].value && !(val = strdup(params[i].value))) {
+                err(__FILE__, __LINE__, NULL, 0);
                 break;
             }
             return val;
@@ -178,40 +159,34 @@ char *search_keys_val_in(const char *key, int param_count, pair *params) {
     return NULL;
 }
 
-// TODO: Determine where global vars like these go (only for organization)
-node **blocks;
-int num_blocks = 0;
-
-void create_token(token **list, TType type, char *built, int *nth) {
+int create_token(token **list, TType type, char *built, int *nth) {
     token *temp = realloc(*list, (*nth + 1) * sizeof(token));
-    if (temp == NULL) {
-        free(temp);
-        return;
+    if (!temp) {
+        err(__FILE__, __LINE__, NULL, 0);
+        return -1;
     }
     temp[*nth].type = type;
     temp[*nth].content = built ? strdup(built) : NULL;
-    if (built != NULL) {
-        built = realloc(built, 1);
-        if (built == NULL) {
-            free(temp);
-            err(__FILE__, __LINE__, built, 0);
-            return;
+    if (built) {
+        if (!temp[*nth].content) {
+            err(__FILE__, __LINE__, temp, 0);
+            return -1;
         }
         built[0] = '\0';
     }
     *list = temp;
 
     (*nth)++;
+    return 1;
 }
 
-void free_token_list(token *list, int size) {
-    for (int i = 0, n = size; i < n; i++) {
-        if (list[i].content && list[i].content != NULL) free(list[i].content);
+void free_token_list(token *list, const int size) {
+    for (int i = 0; i < size; i++) {
+        free(list[i].content);
     }
     free(list);
 }
 
-// NOTE: Uses linear search --> O(n)
 node *get_block(const char *var) {
     for (int i = 0; i < num_blocks; i++) {
         if (strcmp(blocks[i]->content, var) == 0) return blocks[i];
@@ -219,165 +194,112 @@ node *get_block(const char *var) {
     return NULL;
 }
 
-void append(char **str, char *add) {
-    char *temp = realloc(*str, strlen(*str) + strlen(add) + 1);
-    if (temp == NULL) {
-        err(__FILE__, __LINE__, temp, 0);
-        return;
+// NOTE: Intended for stack use only. Pass in -1 or other negative values for new_total_size to let func handle max size
+int append(char *str, const char *add, int new_total_size) {
+    if (!str || !add) return 0;
+    if (new_total_size < 0) new_total_size = sizeof(str);
+    const size_t orig_size = strlen(str);
+    const int is_char = strlen(add) == 1;
+    return is_char ? snprintf(str + orig_size, new_total_size - orig_size, "%c", *add) >= 0 : snprintf(str + orig_size, new_total_size - orig_size, "%s", add) >= 0;
+}
+
+int heap_append(char **str, const char *add, int new_total_size) {
+    if (!str || !*str || !add) return 0;
+    if (new_total_size < 0) new_total_size = strlen(*str) + strlen(add) + 1;
+    char *temp = realloc(*str, new_total_size);
+    if (!temp || !append(temp, add, new_total_size)) {
+        err(__FILE__, __LINE__, NULL, 0);
+        return -1;
     }
-    sprintf(temp, "%s%s", temp, add);
     *str = temp;
+    return 1;
 }
 
-void remove_spaces_btwn(char *s) { // NOTE: Only works for heap strs
-    int i = 0;
-    char *str = strdup(s);
-    if (str == NULL) {
-        err(__FILE__, __LINE__, NULL, 0);
-        return;
+int key_exists_in_arr_pairs(const char *key, const int param_count, const pair *params) {
+    for (int i = 0; i < param_count; i++) {
+        if (params[i].key && key && strcmp(params[i].key, key) == 0) return 1;
     }
-    while (str[i] == ' ' || str[strlen(str) - i - 1] == ' ') {
-        if (str[i] == ' ') {
-            char *leading_temp = strndup(&str[i + 1], strlen(str));
-            if (leading_temp == NULL) {
-                err(__FILE__, __LINE__, leading_temp, 0);
-                return;
-            }
-            str = leading_temp;
-            i--;
-        }
-
-        if (str[strlen(str) - i - 1] == ' ') {
-            char *end_temp = strndup(str, strlen(str) - 1);
-            if (end_temp == NULL) {
-                err(__FILE__, __LINE__, end_temp, 0);
-                return;
-            }
-            str = end_temp;
-        }
-        i++;
-    }
-    s = str;
+    return 0;
 }
 
-void remove_quotes_btwn(char **s) { // NOTE: Only works for heap strs, only beginning/ending quotes if present
-    int i = 0;
-    char *str = strdup(*s);
-    if (str == NULL) {
-        err(__FILE__, __LINE__, NULL, 0);
-        return;
-    }
-    //while (str[i] == '\"' || str[strlen(str) - i - 1] == '\"') {
-        if (str[i] == '\"') {
-            char *leading_temp = strndup(&str[i + 1], strlen(str));
-            if (leading_temp == NULL) {
-                err(__FILE__, __LINE__, leading_temp, 0);
-                return;
-            }
-            str = leading_temp;
-            //i--;
-        }
-
-        if (str[strlen(str) - i - 1] == '\"') {
-            char *end_temp = strndup(str, strlen(str) - 1);
-            if (end_temp == NULL) {
-                err(__FILE__, __LINE__, end_temp, 0);
-                return;
-            }
-            str = end_temp;
-        }
-        //i++;
-    //}
-    *s = str;
+int safely_append_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params) {
+    if (key_exists_in_arr_pairs(key, *len_ptr, params)) return 0;
+    if (!(params[*len_ptr].key = strdup(key)) || !(val && (params[*len_ptr].value = strdup(val)))) return -1;
+    if (!val) params[*len_ptr].value = NULL;
+    (*len_ptr)++;
+    return 1;
 }
 
-// TODO: Deprecate bc only used to get obj collection for FOR nodes
-void *get_json_obj(const char *q, int param_count, pair *params) {
-    if (q == NULL) return NULL;
-    int dot_len = len_btwn(q, ".");
-    int brack_len = len_btwn(q, "[");
-    int index = dot_len < brack_len ? dot_len : brack_len;
-    int has_at_least_one_sep = index > 0;
+void remove_spaces_btwn(char *s) {
+    if (!s) return;
+    while (s[strlen(s) - 1] == ' ') s[strlen(s) - 1] = '\0';
+    while (s[0] == ' ') memmove(&s[0], &s[1], strlen(s));
+}
 
+void remove_outer_q_marks(char *s) {
+    if (!s) return;
+    if (s[strlen(s) - 1] == '"') s[strlen(s) - 1] = '\0';
+    if (s[0] == '"') memmove(&s[0], &s[1], strlen(s));
+}
+
+// NOTE: Only needed to get obj collection for FOR nodes
+json_object *get_json_obj(const char *q, const int param_count, pair *params) {
+    if (!q) return NULL;
     int n = strlen(q);
-    int index_inc = (has_at_least_one_sep < 1 ? 0 : index == dot_len ? 1 : 2);
-    char *root = strndup(q, has_at_least_one_sep >= 1 ? index : n);
-    if (root == NULL) {
-        err(__FILE__, __LINE__, NULL, 0);
-        return NULL;
+    int index = 0;
+
+    int sep = 0; // 0 = no sep, 1 = dot, 2 = bracket
+    for (int i = 0; i < n; i++) {
+        if (q[i] == '.' || q[i] == '[') {
+            sep = q[i] == '.' ? 1 : 2;
+            index = (i + sep);
+            break;
+        }
     }
-    index += index_inc;
+    char root[(sep > 0 ? index : n + 1)];
+    strlcpy(root, q, sizeof(root));
 
     char *json_str = search_keys_val_in(root, param_count, params);
+    if (!json_str) return NULL;
 
-    if (json_str == NULL) {
-        free(root);
-        return NULL;
-    }
-    void *obj = json_tokener_parse(json_str);
-    if (obj != NULL && index > 0) {
-        char *btwn = malloc(1);
-        if (btwn == NULL) {
-            free(root);
-            err(__FILE__, __LINE__, json_str, 0);
-            json_object_put(obj);
-            return NULL;
-        }
+    json_object *obj = json_tokener_parse(json_str);
+    if (obj && index > 0) {
+        char btwn[strlen(q) + 1];
         btwn[0] = '\0';
+
         while (index < n + 1) {
             int inc = strncmp(&q[index], "[\"", 2) == 0 || strncmp(&q[index], "\"]", 2) == 0 ? 2 : strncmp(&q[index], ".", 1) == 0 || strncmp(&q[index], "[", 1) == 0 || strncmp(&q[index], "]", 1) == 0 || index >= n ? 1 : 0;
             if (inc > 0) {
                 char *end;
                 float num = strtod(btwn, &end);
 
-                struct json_object *tmp_obj;
+                struct json_object *tmp_obj = NULL;
                 if (btwn != end && *end == '\0') {
                     tmp_obj = json_object_array_get_idx(obj, num);
                 } else if (json_object_object_get_ex(obj, btwn, &tmp_obj) < 1) {
-                    free(root);
-                    free(json_str);
                     json_object_put(obj);
-                    free(btwn);
-                    err(__FILE__, __LINE__, tmp_obj, 0);
+                    err(__FILE__, __LINE__, json_str, 0);
                     return NULL;
                 }
                 obj = tmp_obj;
-
-                btwn = realloc(btwn, 1);
-                if (btwn == NULL) {
-                    free(root);
-                    free(json_str);
-                    json_object_put(obj);
-                    free(btwn);
-                    err(__FILE__, __LINE__, tmp_obj, 0);
-                    return NULL;
-                }
-                btwn[0] = '\0';
-
+                memset(btwn, '\0', sizeof(btwn));
                 index += inc;
             } else {
-                char *tmp = realloc(btwn, strlen(btwn) + 2);
-                if (tmp == NULL) {
-                    free(root);
-                    free(json_str);
+                char ch = q[index];
+                if (append(btwn, &ch, strlen(btwn) + 2) < 1) {
                     json_object_put(obj);
-                    free(btwn);
-                    err(__FILE__, __LINE__, tmp, 0);
+                    err(__FILE__, __LINE__, json_str, 0);
                     return NULL;
                 }
-                sprintf(tmp, "%s%c", tmp, q[index]);
-                btwn = tmp;
                 index++;
             }
         }
-        free(btwn);
     }
-    free(root);
     free(json_str);
     return obj;
 }
 
-void push_json_to_lua_stack(lua_State *L, json_object *obj, char *property_name) {
+void push_json_to_lua_stack(lua_State *L, json_object *obj, const char *property_name) {
     switch (json_object_get_type(obj)) {
         case json_type_object:
             lua_newtable(L);
@@ -402,31 +324,35 @@ void push_json_to_lua_stack(lua_State *L, json_object *obj, char *property_name)
             lua_pushinteger(L, json_object_get_int(obj));
             break;
         case json_type_string:
-            char *str = strdup(json_object_to_json_string_ext(obj, JSON_C_TO_STRING_NOSLASHESCAPE));
-            remove_quotes_btwn(&str);
-            lua_pushstring(L, str);
-            free(str);
+            const char *str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_NOSLASHESCAPE);
+            if (str) {
+                char temp[strlen(str) + 1];
+                strlcpy(temp, str, sizeof(temp));
+                remove_outer_q_marks(temp);
+                lua_pushstring(L, temp);
+            } else lua_pushnil(L);
             break;
         default:
             lua_pushnil(L);
     }
-    if (property_name != NULL) lua_setfield(L, -2, property_name);
+    if (property_name) lua_setfield(L, -2, property_name);
 }
 
-lua_State *lua_param_stack(node *parent, int param_count, pair *params) {
+lua_State *lua_param_stack(node *parent, const int param_count, const pair *params) {
     lua_State *L = luaL_newstate();
-    if (L == NULL) {
+    if (!L) {
         free_node_tree(parent);
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
     luaL_openlibs(L);
     for (int i = 0; i < param_count; i++) {
-        if (params[i].key == NULL) continue;
-        char *val = params[i].value;
-        if (val != NULL) {
+        char *key = NULL;
+        if (!(key = params[i].key)) continue;
+        const char *val = params[i].value;
+        if (val) {
             struct json_object *obj = json_tokener_parse(val);
-            if (obj != NULL) {
+            if (obj) {
                 push_json_to_lua_stack(L, obj, NULL);
                 json_object_put(obj);
             } else {
@@ -440,111 +366,159 @@ lua_State *lua_param_stack(node *parent, int param_count, pair *params) {
                 } else lua_pushstring(L, val);
             }
         } else lua_pushnil(L);
-        lua_setglobal(L, params[i].key);
+        lua_setglobal(L, key);
     }
     return L;
 }
 
-void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
+int parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
     *extends_from = NULL;
 
     doc->content = NULL;
     doc->children = malloc(sizeof(node));
-    if (doc->children == NULL) {
-        err(__FILE__, __LINE__, NULL, 0);
-        return;
-    }
     doc->num_children = 0;
 
     stack_node *stack = malloc(sizeof(stack_node)); // NOTE: Stack implemented as linked list for quick insertion & deletion
-    if (stack == NULL) {
-        err(__FILE__, __LINE__, doc->children, 0);
-        return;
+    token *tokenlist = (token *) malloc(sizeof(token));
+    if (!doc->children || !stack || !tokenlist) {
+        free_node_tree(doc);
+        err(__FILE__, __LINE__, stack, 0);
+        return -1;
     }
     stack->node = doc;
     stack->next = NULL;
 
-    int i = 0;
-    int n = strlen(html_buf);
-
-    token *tokenlist = (token *) malloc(sizeof(token));
-    if (tokenlist == NULL) {
-        free_node_tree(doc);
-        err(__FILE__, __LINE__, stack, 0);
-        return;
-    }
-    int num_tokens = 0;
+    int i = 0, n = strlen(html_buf), num_tokens = 0;
 
     TType state = TEXT;
     char *built = malloc(1);
-    if (built == NULL) {
+    if (!built) {
         free_node_tree(doc);
         free(stack);
-        free(tokenlist);
-        err(__FILE__, __LINE__, built, 0);
-        return;
+        err(__FILE__, __LINE__, tokenlist, 0);
+        return -1;
     }
     built[0] = '\0';
 
     // Lexer
     while (i < n) {
         if (strncmp(&html_buf[i], "{{ ", 3) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = VAR;
-            i += 3;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = VAR;
+                i += 3;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], " }}", 3) == 0 || strncmp(&html_buf[i], " %}", 3) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = TEXT;
-            i += 3;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = TEXT;
+                i += 3;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% if ", 6) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = IF;
-            i += 6;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = IF;
+                i += 6;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% else %}", 10) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            create_token(&tokenlist, ELSE, NULL, &num_tokens);
-            state = TEXT;
-            i += 10;
+            if (create_token(&tokenlist, state, built, &num_tokens) && create_token(&tokenlist, ELSE, NULL, &num_tokens)) {
+                state = TEXT;
+                i += 10;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% endif %}", 11) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            create_token(&tokenlist, ENDIF, NULL, &num_tokens);
-            state = TEXT;
-            i += 11;
+            if (create_token(&tokenlist, state, built, &num_tokens) && create_token(&tokenlist, ENDIF, NULL, &num_tokens)) {
+                state = TEXT;
+                i += 11;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% for ", 7) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = FOR;
-            i += 7;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = FOR;
+                i += 7;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% endfor %}", 12) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            create_token(&tokenlist, ENDFOR, NULL, &num_tokens);
-            state = TEXT;
-            i += 12;
+            if (create_token(&tokenlist, state, built, &num_tokens) && create_token(&tokenlist, ENDFOR, NULL, &num_tokens)) {
+                state = TEXT;
+                i += 12;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% extends ", 11) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = EXTENDS;
-            i += 11;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = EXTENDS;
+                i += 11;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% block ", 9) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            state = BLOCK;
-            i += 9;
+            if (create_token(&tokenlist, state, built, &num_tokens)) {
+                state = BLOCK;
+                i += 9;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else if (strncmp(&html_buf[i], "{% endblock %}", 14) == 0) {
-            create_token(&tokenlist, state, built, &num_tokens);
-            create_token(&tokenlist, ENDBLOCK, NULL, &num_tokens);
-            state = TEXT;
-            i += 14;
+            if (create_token(&tokenlist, state, built, &num_tokens) && create_token(&tokenlist, ENDBLOCK, NULL, &num_tokens)) {
+                state = TEXT;
+                i += 14;
+            } else {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
+            }
         } else {
             if (i >= n - 1) {
-                create_token(&tokenlist, state, built, &num_tokens);
-                break;
+                if (create_token(&tokenlist, state, built, &num_tokens)) {
+                    break;
+                } else {
+                    free_node_tree(doc);
+                    free(stack);
+                    free_token_list(tokenlist, num_tokens);
+                    return -1;
+                }
             }
-
-            char *temp = realloc(built, strlen(built) + 2);
-            if (temp == NULL) {
-                free(temp);
-                err(__FILE__, __LINE__, temp, 0);
-            } else {
-                sprintf(temp, "%s%c", temp, html_buf[i]);
-                built = temp;
+            char c = html_buf[i];
+            if (heap_append(&built, &c, strlen(built) + 2) < 1) {
+                free_node_tree(doc);
+                free(stack);
+                free_token_list(tokenlist, num_tokens);
+                return -1;
             }
             i++;
         }
@@ -560,22 +534,25 @@ void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
         token *parsing = &tokenlist[j];
         switch (parsing->type) {
             case EXTENDS:
-                if (parsing->content[0] == '\"' && parsing->content[strlen(parsing->content) - 1] == '\"') {
-                    *extends_from = strndup(&parsing->content[1], strlen(parsing->content) - 2);
-                    if (extends_from == NULL) err(__FILE__, __LINE__, NULL, 0);
-                } else *extends_from = parsing->content;
+                if (!parsing->content || (parsing->content && !(*extends_from = strdup(parsing->content)))) {
+                    free_node_tree(doc);
+                    free(stack);
+                    free_token_list(tokenlist, num_tokens);
+                    return -1;
+                }
+                remove_outer_q_marks(*extends_from);
                 break;
             case ENDIF:
             case ENDFOR:
             case ENDBLOCK:
                 if (parsing->type == ENDBLOCK && get_block(current_parent->content) == NULL) {
                     node **tmp_blocks = realloc(blocks, sizeof(node) * (num_blocks + 1));
-                    if (tmp_blocks == NULL) {
+                    if (!tmp_blocks) {
                         free_node_tree(doc);
                         free_stack(stack);
                         free_token_list(tokenlist, num_tokens);
-                        err(__FILE__, __LINE__, tmp_blocks, 0);
-                        return;
+                        err(__FILE__, __LINE__, NULL, 0);
+                        return -1;
                     } else {
                         tmp_blocks[num_blocks++] = current_parent;
                         blocks = tmp_blocks;
@@ -591,37 +568,36 @@ void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
                 break;
             case ELSE:
                 current_parent->sec_children = malloc(sizeof(node));
-                if (current_parent->sec_children == NULL) {
+                if (!current_parent->sec_children) {
                     free_node_tree(doc);
                     free_stack(stack);
                     free_token_list(tokenlist, num_tokens);
                     err(__FILE__, __LINE__, NULL, 0);
-                    return;
+                    return -1;
                 }
                 current_children = current_parent->sec_children;
                 num_child_ptr = &(current_parent->num_sec_children);
                 break;
             default:
                 int using_sec = current_children != current_parent->children;
-                node **temp_list = realloc(current_children, sizeof(node) * (*num_child_ptr + 1)); // error here
-                if (temp_list == NULL) {
+                node **temp_list = realloc(current_children, sizeof(node) * (*num_child_ptr + 1));
+                if (!temp_list) {
                     free_node_tree(doc);
                     free_stack(stack);
                     free_token_list(tokenlist, num_tokens);
-                    err(__FILE__, __LINE__, temp_list, 0);
-                    return;
+                    err(__FILE__, __LINE__, NULL, 0);
+                    return -1;
                 }
                 temp_list[*num_child_ptr] = malloc(sizeof(node));
                 node *new_child = temp_list[*num_child_ptr];
-                if (temp_list[*num_child_ptr] == NULL) {
+                if (!temp_list[*num_child_ptr] || (parsing->content && !(new_child->content = strdup(parsing->content)))) {
                     free_node_tree(doc);
                     free_stack(stack);
                     free_token_list(tokenlist, num_tokens);
                     err(__FILE__, __LINE__, temp_list, 0);
-                    return;
+                    return -1;
                 }
                 new_child->type = parsing->type;
-                new_child->content = strdup(parsing->content);
 
                 new_child->num_children = 0;
                 new_child->num_sec_children = 0;
@@ -635,12 +611,12 @@ void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
 
                 if (parsing->type == IF || parsing->type == FOR || parsing->type == BLOCK) {
                     stack_node *tmp = malloc(sizeof(stack_node));
-                    if (tmp == NULL) {
+                    if (!tmp) {
                         free_node_tree(doc);
                         free_stack(stack);
                         free_token_list(tokenlist, num_tokens);
                         err(__FILE__, __LINE__, NULL, 0);
-                        return;
+                        return -1;
                     }
                     tmp->node = new_child;
                     tmp->next = stack;
@@ -648,12 +624,12 @@ void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
 
                     current_parent = stack->node;
                     current_parent->children = malloc(sizeof(node));
-                    if (current_parent->children == NULL) {
+                    if (!current_parent->children) {
                         free_node_tree(doc);
                         free_stack(stack);
                         free_token_list(tokenlist, num_tokens);
                         err(__FILE__, __LINE__, NULL, 0);
-                        return;
+                        return -1;
                     }
 
                     current_children = current_parent->children;
@@ -663,6 +639,7 @@ void parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
     }
     free_token_list(tokenlist, num_tokens);
     free_stack(stack);
+    return 1;
 }
 
 void render(char **output, node *parent, int param_count, pair *params, int using_prim) {
@@ -678,248 +655,213 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                 break;
             case BLOCK:
                 node *block = get_block(child->content);
-                if (block != NULL) render(output, block, param_count, params, 1);
+                if (block) render(output, block, param_count, params, 1);
                 break;
             case FOR:
-                int sep = strstr(child->content, " in ") - child->content;
-                char *it = strndup(child->content, sep);
-                char *coll = &child->content[sep + 4];
-                if (it == NULL || coll == NULL) continue;
+                {
+                    int sep = strstr(child->content, " in ") - child->content;
+                    char it[sep + 1];
+                    strlcpy(it, child->content, sizeof(it));
+                    char *coll = &child->content[sep + 4];
+                    if (!coll) continue;
 
-                remove_spaces_btwn(it);
-                remove_spaces_btwn(coll);
+                    remove_spaces_btwn(it);
+                    remove_spaces_btwn(coll);
 
-                void *json_obj;
-                if ((json_obj = get_json_obj(coll, param_count, params)) != NULL) {
-                    switch (json_object_get_type(json_obj)) {
-                        case json_type_object:
-                            json_object_object_foreach(json_obj, key, val) {
-                                pair new_p[(param_count + 1) * sizeof(*params)];
-                                memcpy(new_p, params, param_count * sizeof(*params));
+                    json_object *json_obj = NULL;
+                    if ((json_obj = get_json_obj(coll, param_count, params))) {
+                        int p = param_count; // Placeholder var to satisfy int *len_ptr
+                        switch (json_object_get_type(json_obj)) {
+                            case json_type_object:
+                                json_object_object_foreach(json_obj, key, val) {
+                                    pair new_p[(param_count + 1) * sizeof(*params)];
+                                    memcpy(new_p, params, param_count * sizeof(*params));
 
-                                new_p[param_count].key = strdup(it);
-                                new_p[param_count].value = strdup(key);
-                                if (new_p[param_count].key == NULL || new_p[param_count].value == NULL) {
-                                    free_node_tree(parent);
-                                    free(it);
-                                    if (new_p[param_count].key) free(new_p[param_count].key);
-                                    if (new_p[param_count].value) free(new_p[param_count].value);
-                                    err(__FILE__, __LINE__, NULL, 0);
-                                    return;
+                                    new_p[param_count].key = strdup(it);
+                                    new_p[param_count].value = strdup(key);
+
+                                    if (!new_p[param_count].key || !new_p[param_count].value) {
+                                        free_node_tree(parent);
+                                        free(new_p[param_count].key);
+                                        free(new_p[param_count].value);
+                                        return;
+                                    }
+
+                                    render(output, child, param_count + 1, new_p, 1);
+
+                                    free(new_p[param_count].key);
+                                    free(new_p[param_count].value);
                                 }
+                                break;
+                            case json_type_array:
+                                for (int k = 0, n = json_object_array_length(json_obj); k < n; k++) {
+                                    pair new_p[(param_count + 1) * sizeof(*params)];
+                                    memcpy(new_p, params, param_count * sizeof(*params));
 
-                                render(output, child, param_count + 1, new_p, 1);
+                                    new_p[param_count].key = strdup(it);
+                                    new_p[param_count].value = strdup(json_object_to_json_string_ext(json_object_array_get_idx(json_obj, k), JSON_C_TO_STRING_NOSLASHESCAPE));
 
-                                free(new_p[param_count].key);
-                                free(new_p[param_count].value);
-                            }
-                            break;
-                        case json_type_array:
-                            for (int k = 0, n = json_object_array_length(json_obj); k < n; k++) {
-                                pair new_p[(param_count + 1) * sizeof(*params)];
-                                memcpy(new_p, params, param_count * sizeof(*params));
+                                    if (!new_p[param_count].key || !new_p[param_count].value) {
+                                        free_node_tree(parent);
+                                        free(new_p[param_count].key);
+                                        free(new_p[param_count].value);
+                                        return;
+                                    }
 
-                                new_p[param_count].key = strdup(it);
-                                new_p[param_count].value = strdup(json_object_to_json_string_ext(json_object_array_get_idx(json_obj, k), JSON_C_TO_STRING_NOSLASHESCAPE));
-                                if (new_p[param_count].key == NULL || new_p[param_count].value == NULL) {
-                                    free_node_tree(parent);
-                                    free(it);
-                                    if (new_p[param_count].key) free(new_p[param_count].key);
-                                    if (new_p[param_count].value) free(new_p[param_count].value);
-                                    err(__FILE__, __LINE__, NULL, 0);
-                                    return;
+                                    render(output, child, param_count + 1, new_p, 1);
+
+                                    free(new_p[param_count].key);
+                                    free(new_p[param_count].value);
                                 }
+                                break;
+                            default:
+                                break;
+                        }
+                        json_object_put(json_obj);
+                    } else if (strncmp(coll, "range(", 6) == 0) {
+                        int num_sep = strchr(coll, ',') - coll;
 
-                                render(output, child, param_count + 1, new_p, 1);
+                        char start_str[num_sep - 5];
+                        strlcpy(start_str, &coll[6], sizeof(start_str));
+                        remove_spaces_btwn(start_str);
 
-                                free(new_p[param_count].key);
-                                free(new_p[param_count].value);
-                            }
-                            break;
-                        default:
-                            break;
-                    }
-                    json_object_put(json_obj);
-                } else if (strncmp(coll, "range(", 6) == 0) {
-                    int num_sep = strchr(coll, ',') - coll;
+                        char end_str[strlen(coll) - num_sep];
+                        strlcpy(end_str, &coll[num_sep + 1], sizeof(end_str));
+                        remove_spaces_btwn(end_str);
 
-                    char *start_str = strndup(&coll[6], num_sep - 6);
-                    if (start_str == NULL) {
-                        free_node_tree(parent);
-                        free(it);
-                        err(__FILE__, __LINE__, NULL, 0);
-                        return;
-                    }
-                    remove_spaces_btwn(start_str);
-                    int start = atoi(start_str);
+                        char *s_end, *end_end;
 
-                    char *end_str = strndup(&coll[num_sep + 1], strlen(coll) - num_sep - 1);
-                    if (end_str == NULL) {
-                        free_node_tree(parent);
-                        free(it);
-                        err(__FILE__, __LINE__, NULL, 0);
-                        return;
-                    }
-                    remove_spaces_btwn(end_str);
-                    int end = atoi(end_str);
+                        int start = strtol(start_str, &s_end, 10);
+                        int end = strtol(end_str, &end_end, 10);
 
-                    free(start_str);
-                    free(end_str);
-                    for (int i = start; i < end; i++) {
-                        pair new_p[(param_count + 1) * sizeof(*params)];
-                        memcpy(new_p, params, param_count * sizeof(*params));
-                        new_p[param_count].key = strdup(it);
-                        new_p[param_count].value = malloc(num_digits(i) + 1);
-                        if (new_p[param_count].key == NULL || new_p[param_count].value == NULL) {
+                        if (s_end == start_str || end_end == end_str) { // *s_end == '\0' check might not be ideal
                             free_node_tree(parent);
-                            free(it);
-                            if (new_p[param_count].key) free(new_p[param_count].key);
-                            if (new_p[param_count].value) free(new_p[param_count].value);
                             err(__FILE__, __LINE__, NULL, 0);
                             return;
                         }
-                        sprintf(new_p[param_count].value, "%i", i);
-                        render(output, child, param_count + 1, new_p, 1);
 
-                        free(new_p[param_count].key);
-                        free(new_p[param_count].value);
+                        for (int i = start; i < end; i++) {
+                            size_t val_size = num_digits(i) + 1;
+                            pair new_p[(param_count + 1) * sizeof(*params)];
+                            memcpy(new_p, params, param_count * sizeof(*params));
+                            new_p[param_count].key = strdup(it);
+                            new_p[param_count].value = malloc(val_size);
+                            if (!new_p[param_count].key || !new_p[param_count].value || snprintf(new_p[param_count].value, val_size, "%i", i) < 0) {
+                                free_node_tree(parent);
+                                free(new_p[param_count].key);
+                                free(new_p[param_count].value);
+                                err(__FILE__, __LINE__, NULL, 0);
+                                return;
+                            }
+                            render(output, child, param_count + 1, new_p, 1);
+
+                            free(new_p[param_count].key);
+                            free(new_p[param_count].value);
+                        }
                     }
+                    break;
                 }
-                free(it);
-                break;
             case IF:
-                char *condition = child->content;
+                {
+                    char *condition = child->content;
 
-                if (!L) {
-                    L = lua_param_stack(parent, param_count, params);
-                    if (L == NULL) {
-                        free_node_tree(parent);
-                        err(__FILE__, __LINE__, NULL, 0);
-                        return;
-                    }
-                }
-
-                char *return_what = malloc(7 + strlen(condition) + 1);
-                if (return_what == NULL) {
-                    free_node_tree(parent);
-                    err(__FILE__, __LINE__, NULL, 0);
-                    lua_close(L);
-                    return;
-                }
-                sprintf(return_what, "return %s", condition);
-                luaL_dostring(L, return_what);
-                free(return_what);
-
-                render(output, child, param_count, params, lua_toboolean(L, -1));
-                lua_pop(L, 1);
-                break;
-            case VAR:
-                char *val;
-                if ((val = search_keys_val_in(child->content, param_count, params)) == NULL) {
                     if (!L) {
-                        L = lua_param_stack(child, param_count, params);
-                        if (L == NULL) {
+                        L = lua_param_stack(parent, param_count, params);
+                        if (!L) {
                             free_node_tree(parent);
                             err(__FILE__, __LINE__, NULL, 0);
                             return;
                         }
                     }
-                    char *return_var = malloc(7 + strlen(child->content) + 1);
-                    if (return_var == NULL) {
+
+                    char return_what[7 + strlen(condition) + 1];
+                    if (snprintf(return_what, sizeof(return_what), "return %s", condition) < 0 || luaL_dostring(L, return_what) != LUA_OK) {
                         free_node_tree(parent);
-                        lua_close(L);
                         err(__FILE__, __LINE__, NULL, 0);
+                        lua_close(L);
                         return;
                     }
-                    sprintf(return_var, "return %s", child->content);
+                    render(output, child, param_count, params, lua_toboolean(L, -1));
+                    lua_pop(L, 1);
+                    break;
+                }
+            case VAR:
+                {
+                    char *val = NULL;
+                    if (!(val = search_keys_val_in(child->content, param_count, params))) {
+                        if (!L) {
+                            L = lua_param_stack(child, param_count, params);
+                            if (!L) {
+                                free_node_tree(parent);
+                                err(__FILE__, __LINE__, NULL, 0);
+                                return;
+                            }
+                        }
+                        char return_var[7 + strlen(child->content) + 1];
+                        if (snprintf(return_var, sizeof(return_var), "return %s", child->content) < 0) {
+                            free_node_tree(parent);
+                            err(__FILE__, __LINE__, NULL, 0);
+                            lua_close(L);
+                            return;
+                        }
+                        int lua_succeeded = luaL_dostring(L, return_var) == LUA_OK;
 
-                    int lua_succeeded = luaL_dostring(L, return_var) == LUA_OK;
-                    free(return_var);
-
-                    const char *to_str = lua_tostring(L, -1);
-                    char *ret = lua_succeeded == 1 && to_str != NULL ? strdup(to_str) : NULL;
-                    if (ret != NULL) {
-                        decode(ret);
-                        char *sanitized = sanitize(ret);
-                        if (sanitized == NULL) {
+                        const char *to_str = lua_tostring(L, -1);
+                        char *sanitized = NULL;
+                        if (lua_succeeded && to_str && (!(sanitized = sanitize(to_str)) || heap_append(output, sanitized, -1) < 1)) {
                             free_node_tree(parent);
                             lua_close(L);
-                            free(ret);
+                            err(__FILE__, __LINE__, sanitized, 0);
+                            return;
+                        }
+                        lua_pop(L, 1);
+                    } else {
+                        char *sanitized = sanitize(val);
+                        if (!sanitized || heap_append(output, sanitized, -1) < 1) {
+                            free_node_tree(parent);
+                            free(val);
                             free(sanitized);
                             err(__FILE__, __LINE__, NULL, 0);
                             return;
                         }
-                        append(output, sanitized);
                         free(sanitized);
-                    }
-                    free(ret);
-                    lua_pop(L, 1);
-                } else {
-                    decode(val);
-                    remove_quotes_btwn(&val);
-                    char *sanitized = sanitize(val);
-                    if (sanitized == NULL) {
-                        free_node_tree(parent);
                         free(val);
-                        free(sanitized);
-                        err(__FILE__, __LINE__, NULL, 0);
-                        return;
                     }
-                    append(output, sanitized);
-                    free(sanitized);
-                    free(val);
+                    break;
                 }
-                break;
             default:
                 char *text = child->content;
-                if (text == NULL) continue;
-                append(output, text);
+                if (!text || heap_append(output, text, -1) < 1) continue;
         }
     }
     if (L) lua_close(L);
 }
 
 char *rendered_template(const char *html_buf, int param_count, pair *params) {
-    node *doc = malloc(sizeof(node)), *ext;
-    if (doc == NULL) {
-        err(__FILE__, __LINE__, NULL, 0);
-        return strdup(html_buf);
-    }
-
+    node *doc = malloc(sizeof(node)), *ext = NULL;
     blocks = malloc(sizeof(node));
-
     char *new_buf = malloc(1);
-    if (blocks == NULL || new_buf == NULL) {
-        free_node_tree(doc);
+    if (!doc || !blocks || !new_buf) {
+        free(doc); // Not free_node_tree(doc) bc doc is just malloced
         err(__FILE__, __LINE__, blocks, 0);
         return strdup(html_buf);
     }
     new_buf[0] = '\0';
+    doc->content = NULL;
 
     char *extends_from;
-    parse_node_tree(doc, html_buf, &extends_from); // NOTE: Mainly to add the blocks into the blocks array first (if inheriting)
-    if (extends_from != NULL) { // NOTE: Assuming no grandparent
+    if (parse_node_tree(doc, html_buf, &extends_from) < 1) { // NOTE: Mainly to add the blocks into the blocks array first (if inheriting)
+        free_node_tree(doc);
+        free(blocks);
+        free(extends_from);
+        return strdup(html_buf);
+    }
+    if (extends_from) { // NOTE: Assuming no grandparent
         ext = malloc(sizeof(node));
-        if (ext == NULL) {
-            free_node_tree(doc);
-            free(blocks);
-            err(__FILE__, __LINE__, new_buf, 0);
-            return strdup(html_buf);
-        }
+        char path[strlen(extends_from) + 12 + 1];
+        FILE *f = NULL;
 
-        char *path = malloc(strlen(extends_from) + 12 + 1);
-        if (path == NULL) {
-            free_node_tree(doc);
-            free(blocks);
-            free(new_buf);
-            err(__FILE__, __LINE__, ext, 0);
-            return strdup(html_buf);
-        }
-        sprintf(path, "../frontend/%s", extends_from);
-
-        FILE *f = fopen(path, "r");
-        free(path);
-        if (f == NULL) {
+        if (!ext || snprintf(path, sizeof(path), "../frontend/%s", extends_from) < 0 || !(f = fopen(path, "r"))) {
             free_node_tree(doc);
             free(blocks);
             free(new_buf);
@@ -931,16 +873,22 @@ char *rendered_template(const char *html_buf, int param_count, pair *params) {
         char ext_buf[size + 1];
         fread(ext_buf, sizeof(char), size, f);
         ext_buf[size] = '\0';
-
-        parse_node_tree(ext, ext_buf, &extends_from);
         fclose(f);
+
+        if (parse_node_tree(ext, ext_buf, &extends_from) < 1) {
+            free_node_tree(doc);
+            free(blocks);
+            free(new_buf);
+            err(__FILE__, __LINE__, ext, 0);
+            return strdup(html_buf);
+        }
         render(&new_buf, ext, param_count, params, 1);
-        if (ext) free_node_tree(ext);
+        free_node_tree(ext);
     } else render(&new_buf, doc, param_count, params, 1);
 
-    if (extends_from) free(extends_from);
-    if (doc) free_node_tree(doc);
-    if (blocks) free(blocks);
+    free(extends_from);
+    free_node_tree(doc);
+    free(blocks);
     num_blocks = 0;
     return new_buf;
 }

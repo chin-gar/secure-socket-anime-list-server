@@ -25,7 +25,7 @@ Search for "{{ filter[text] }}"
     {% if results and results.meta.count > 0 and #results.data > 0 %}
       {% for entry in results.data %}
           <div class="bg-white/75 dark:bg-linear-to-tl dark:from-red-500/40 dark:to-red-300/30 rounded-lg w-50 outline outline-white h-fit">
-            <img class="rounded-sm" src={{ entry.attributes.posterImage.small }} title={{ "~"..entry.attributes.episodeLength.." mins per episode\nStarted: "..entry.attributes.startDate.."\n"..(entry.attributes.endDate and "Ended: "..entry.attributes.endDate.."\n" or "").."Status: "..entry.attributes.status.."\n\nDescription: "..entry.attributes.description }}>
+            <img class="rounded-sm" src={{ entry.attributes.posterImage.original }} title={{ "~"..entry.attributes.episodeLength.." mins per episode\nStarted: "..entry.attributes.startDate.."\n"..(entry.attributes.endDate and "Ended: "..entry.attributes.endDate.."\n" or "").."Status: "..entry.attributes.status.."\n\nDescription: "..entry.attributes.description }}>
             <div class="p-2 h-28 flex flex-col place-content-center">
               <h1 id={{ entry.id.."Title" }} class="w-full text-center text-md text-ellipsis overflow-hidden mb-1" style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;">
                 {{ (entry.attributes.titles.en and entry.attributes.titles.en:match("^%s*$") == nil and entry.attributes.titles.en ~= "\"\"") and entry.attributes.titles.en or (entry.attributes.titles.en_us) and entry.attributes.titles.en_us or (entry.attributes.titles.en_jp) and entry.attributes.titles.en_jp or entry.attributes.titles.en_cn }}

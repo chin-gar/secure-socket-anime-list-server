@@ -64,7 +64,7 @@ List
     {% if #list > 0 %}
       {% for entry in list %}
           <div class="bg-white/75 dark:bg-linear-to-tl dark:from-red-500/40 dark:to-red-300/30 rounded-lg w-50 outline outline-white h-fit">
-            <img class="rounded-sm" src={{ entry.data.attributes.posterImage.small }} title={{ "~"..entry.data.attributes.episodeLength.." mins per episode\nStarted: "..entry.data.attributes.startDate.."\n"..(entry.data.attributes.endDate and "Ended: "..entry.data.attributes.endDate.."\n" or "").."Status: "..entry.data.attributes.status.."\n\nDescription: "..entry.data.attributes.description }}>
+            <img class="rounded-sm" src={{ entry.data.attributes.posterImage.original }} title={{ "~"..entry.data.attributes.episodeLength.." mins per episode\nStarted: "..entry.data.attributes.startDate.."\n"..(entry.data.attributes.endDate and "Ended: "..entry.data.attributes.endDate.."\n" or "").."Status: "..entry.data.attributes.status.."\n\nDescription: "..entry.data.attributes.description }}>
             <div class="p-2 h-28 flex flex-col place-content-center">
               <h1 id={{ entry.data.id.."Title" }} class="w-full text-center text-md text-ellipsis overflow-hidden mb-1" style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;">
                 {{ (entry.data.attributes.titles.en and entry.data.attributes.titles.en:match("^%s*$") == nil and entry.data.attributes.titles.en ~= "\"\"") and entry.data.attributes.titles.en or (entry.data.attributes.titles.en_us) and entry.data.attributes.titles.en_us or (entry.data.attributes.titles.en_jp) and entry.data.attributes.titles.en_jp or entry.data.attributes.titles.en_cn }}
