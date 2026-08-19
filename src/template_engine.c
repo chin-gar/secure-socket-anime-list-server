@@ -222,8 +222,26 @@ int key_exists_in_arr_pairs(const char *key, const int param_count, const pair *
     return 0;
 }
 
-int safely_append_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params) {
-    if (key_exists_in_arr_pairs(key, *len_ptr, params)) return 0;
+int safely_update_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params, const int override_existing) {
+    for (int i = 0; i < *len_ptr; i++) {
+        if (params[i].key && key && strcmp(params[i].key, key) == 0) {
+            if (override_existing > 0) {
+                char *tmp_key = strdup(key);
+                char *tmp_val = val ? strdup(val) : NULL;
+                if (!tmp_key || (val && !tmp_val)) {
+                    err(__FILE__, __LINE__, tmp_key, 0);
+                    return -1;
+                }
+                free(params[i].key);
+                free(params[i].value);
+                params[i].key = tmp_key;
+                params[i].value = tmp_val;
+                return 1;
+            } else {
+                return 0;
+            }
+        }
+    }
     if (!(params[*len_ptr].key = strdup(key)) || !(val && (params[*len_ptr].value = strdup(val)))) return -1;
     if (!val) params[*len_ptr].value = NULL;
     (*len_ptr)++;

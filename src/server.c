@@ -399,7 +399,7 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
             building_key = 1;
             temp[0].value = strdup(built);
             if (temp[0].value) decode(temp[0].value);
-            if (!temp[0].value || safely_append_into_arr_pair(temp[0].key, temp[0].value, len_ptr, p) < 1) {
+            if (!temp[0].value || safely_update_into_arr_pair(temp[0].key, temp[0].value, len_ptr, p, 0) < 1) {
                 err(__FILE__, __LINE__, queries, 0);
                 free(temp[0].key);
                 free(temp[0].value);
@@ -484,11 +484,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     connection *conn = (connection *) arg;
     SSL *ssl = conn->ssl;
 
-    // if (!ssl || (ssl && SSL_get_fd(ssl) < 0)) {
-    //     close_conn(conn);
-    //     return NULL;
-    // }
-
     char r[MAX_HTTP_SIZE + 1];
     r[0] = '\0';
 
@@ -534,7 +529,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 break;
             if (snprintf(session + strlen(session), sizeof(session), "%c", r[i]) < 0) {
                 err(__FILE__, __LINE__, NULL, 0);
-                safely_append_into_arr_pair("err_reason", "Cannot fetch session right now", &num_params, params);
+                safely_update_into_arr_pair("err_reason", "Cannot fetch session right now", &num_params, params, 1);
                 send_file_to(conn, "500.html", NULL, num_params, params);
                 goto done;
             }
@@ -575,7 +570,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             int expired = diff >= 0;
 
             sqlite3_reset(stmt);
-            if (safely_append_into_arr_pair(expired ? "set_session" : "session", expired ? "" : session, &num_params, params) < 1 || ((expired && (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id = ?;", -1, &stmt, NULL) != SQLITE_OK)) || (!expired && sqlite3_prepare_v2(db, "UPDATE sessions SET expires_at = datetime('now', '+30 minutes') WHERE id = ?;", -1, &stmt, NULL) != SQLITE_OK)) || sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) != SQLITE_OK) {
+            if (safely_update_into_arr_pair(expired ? "set_session" : "session", expired ? "" : session, &num_params, params, 1) < 1 || ((expired && (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id = ?;", -1, &stmt, NULL) != SQLITE_OK)) || (!expired && sqlite3_prepare_v2(db, "UPDATE sessions SET expires_at = datetime('now', '+30 minutes') WHERE id = ?;", -1, &stmt, NULL) != SQLITE_OK)) || sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) != SQLITE_OK) {
                 err(__FILE__, __LINE__, NULL, 0);
                 printf("Updating cli session err: %s\n", sqlite3_errmsg(db));
                 sqlite3_finalize(stmt);
@@ -585,7 +580,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             }
             sqlite3_step(stmt);
         } else {
-            if (safely_append_into_arr_pair("set_session", "", &num_params, params) < 1) {
+            if (safely_update_into_arr_pair("set_session", "", &num_params, params, 1) < 1) {
                 err(__FILE__, __LINE__, NULL, 0);
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
@@ -600,7 +595,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     // TODO: Rethink if url char limit necessary and/or change anime search bar to match/drop req, considering encoded/decoded chars
     if (!url || strlen(url) > URL_CHAR_LIMIT) {
         char val[43 + num_digits(URL_CHAR_LIMIT) + 1];
-        safely_append_into_arr_pair("err_reason", snprintf(val, sizeof(val), "Invalid URL or URL exceeds %i character limit", URL_CHAR_LIMIT) >= 0 ? val : "Invalid URL but can't fetch character limit", &num_params, params);
+        safely_update_into_arr_pair("err_reason", snprintf(val, sizeof(val), "Invalid URL or URL exceeds %i character limit", URL_CHAR_LIMIT) >= 0 ? val : "Invalid URL but can't fetch character limit", &num_params, params, 1);
         send_file_to(conn, "404.html", NULL, num_params, params);
         goto done;
     }
@@ -631,37 +626,28 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             char *title = NULL;
             int t_len_exceeded = -1;
             if (!(title = search_keys_val_in("filter[text]", num_params, params)) || (t_len_exceeded = (strlen(title) > 300))) {
-                printf("title: %s\n", title);
-                if (t_len_exceeded == 1) safely_append_into_arr_pair("err_reason", "Title is too long", &num_params, params);
+                if (t_len_exceeded == 1) safely_update_into_arr_pair("err_reason", "Title is too long", &num_params, params, 1);
                 send_file_to(conn, "400.html", NULL, num_params, params);
                 goto done;
             }
 
             char search_url[15 + strlen(&url[7]) + 1];
             char *buf = NULL;
-            if (snprintf(search_url, sizeof(search_url), "/api/edge/anime%s", strcmp(&url[21], "") != 0 ? &url[7] : "") >= 0 && (buf = recv_https_from_req(search_url, API_URL, "GET", NULL))) {
-                to_json_str_from_res(&buf);
-            } else {
-                if (safely_append_into_arr_pair("search_err", "Couldn't fetch results...", &num_params, params) < 1) {
+            if (snprintf(search_url, sizeof(search_url), "/api/edge/anime%s", strcmp(&url[21], "") != 0 ? &url[7] : "") < 0 || !(buf = recv_https_from_req(search_url, API_URL, "GET", NULL)) || !to_json_str_from_res(&buf) || safely_update_into_arr_pair("results", buf, &num_params, params, 1) < 1) {
+                if (safely_update_into_arr_pair("search_err", "Couldn't fetch results...", &num_params, params, 1) < 1) {
                     send_file_to(conn, "500.html", NULL, num_params, params);
                 } else send_file_to(conn, "search.html", NULL, num_params, params);
-                err(__FILE__, __LINE__, NULL, 0);
+                err(__FILE__, __LINE__, buf, 0);
                 goto done;
             }
-            params[num_params].key = strdup("results");
-            params[num_params++].value = buf; // NOTE: buf freed on free params loop
-            if (!params[num_params - 1].key) {
-                err(__FILE__, __LINE__, NULL, 0);
-                send_file_to(conn, "500.html", NULL, num_params, params);
-                goto done;
-            }
+            free(buf);
 
             if (strcmp(session, "") != 0 && uid > 0) {
                 sqlite3 *db = NULL;
                 sqlite3_stmt *stmt = NULL;
                 if (sqlite3_open("data.db", &db) != SQLITE_OK || sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK) {
                     err(__FILE__, __LINE__, NULL, 0);
-                    if (safely_append_into_arr_pair("search_err", sqlite3_errmsg(db), &num_params, params) < 1) {
+                    if (safely_update_into_arr_pair("search_err", sqlite3_errmsg(db), &num_params, params, 1) < 1) {
                         send_file_to(conn, "500.html", NULL, num_params, params);
                     } else send_file_to(conn, "search.html", NULL, num_params, params);
                     sqlite3_finalize(stmt);
@@ -674,7 +660,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     json_object_object_add(anime_list, (char *) sqlite3_column_text(stmt, 0), json_object_new_int(sqlite3_column_int(stmt, 1))); // 1st column guaranteed to not be NULL bc .schema progress;
                 }
                 if (json_object_object_length(anime_list) > 0) {
-                    safely_append_into_arr_pair("list", json_object_to_json_string_ext(anime_list, JSON_C_TO_STRING_NOSLASHESCAPE), &num_params, params);
+                    safely_update_into_arr_pair("list", json_object_to_json_string_ext(anime_list, JSON_C_TO_STRING_NOSLASHESCAPE), &num_params, params, 1);
                 }
                 json_object_put(anime_list);
                 sqlite3_close(db);
@@ -693,7 +679,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 if (p_str) page = strtol(p_str ? p_str : "", &end, 10);
                 if (p_str && (p_str == end || *end != '\0' || page < 1)) {
                     free(p_str);
-                    safely_append_into_arr_pair("err_reason", "Invalid page number.", &num_params, params);
+                    safely_update_into_arr_pair("err_reason", "Invalid page number.", &num_params, params, 1);
                     send_file_to(conn, "400.html", NULL, num_params, params);
                     goto done;
                 }
@@ -758,7 +744,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     free(buf);
                 }
                 char *json_str = NULL;
-                if (arr && (json_str = (char *) json_object_to_json_string_ext(arr, JSON_C_TO_STRING_NOSLASHESCAPE)) && safely_append_into_arr_pair("list", json_str, &num_params, params)) {
+                if (arr && (json_str = (char *) json_object_to_json_string_ext(arr, JSON_C_TO_STRING_NOSLASHESCAPE)) && safely_update_into_arr_pair("list", json_str, &num_params, params, 1)) {
                     send_file_to(conn, "list.html", NULL, num_params, params);
                     json_object_put(arr);
                 } else {
@@ -820,16 +806,16 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 int pwd_len = 0;
                 int err_happened = 0;
                 if (!username || (username_len = strlen(username)) < 1 || username_len > 20) {
-                    safely_append_into_arr_pair("username_err", "Invalid username length", &num_params, params);
+                    safely_update_into_arr_pair("username_err", "Invalid username length", &num_params, params, 1);
                     err_happened = 1;
                 } else if (regcomp(&reg, "^[A-Za-z0-9_-]{1,20}$", REG_EXTENDED) == 0 && regexec(&reg, username, 0, NULL, 0) != 0) {
-                    safely_append_into_arr_pair("username_err", "Only letters, numbers, underscores, and hyphens allowed", &num_params, params);
+                    safely_update_into_arr_pair("username_err", "Only letters, numbers, underscores, and hyphens allowed", &num_params, params, 1);
                     err_happened = 1;
                 } else {
                     if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM users WHERE username = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC) != SQLITE_OK) {
                         err(__FILE__, __LINE__, NULL, 0);
                         printf("Lookup users prep failure: %s\n", sqlite3_errmsg(db));
-                        safely_append_into_arr_pair("username_err", "Server-side username lookup error", &num_params, params);
+                        safely_update_into_arr_pair("username_err", "Server-side username lookup error", &num_params, params, 1);
                         err_happened = 1;
                     } else {
                         int num_users_with_that = 0;
@@ -837,18 +823,18 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                             num_users_with_that = sqlite3_column_int(stmt, 0);
                         }
                         if (num_users_with_that > 0) {
-                            safely_append_into_arr_pair("username_err", "Username already taken", &num_params, params);
+                            safely_update_into_arr_pair("username_err", "Username already taken", &num_params, params, 1);
                             err_happened = 1;
                         }
                         sqlite3_reset(stmt);
                     }
                 }
                 if (!pwd || (pwd_len = strlen(pwd)) < 15) {  // NOTE: require 15+ chars in pwd according to NIST, no sp. char requirement bc more char count more effective than requiring variety of sp. chars
-                    safely_append_into_arr_pair("pwd_err", "Invalid password length", &num_params, params);
+                    safely_update_into_arr_pair("pwd_err", "Invalid password length", &num_params, params, 1);
                     err_happened = 1;
                 }
                 if (!confirm_pwd || (pwd && strcmp(pwd, confirm_pwd) != 0) || strcmp(confirm_pwd, "") == 0) {
-                    safely_append_into_arr_pair("confirm_err", "Passwords don't match", &num_params, params);
+                    safely_update_into_arr_pair("confirm_err", "Passwords don't match", &num_params, params, 1);
                     err_happened = 1;
                 }
                 free(confirm_pwd);
@@ -911,7 +897,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     printf("Login preparation err: %s\n", sqlite3_errmsg(db));
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
-                    safely_append_into_arr_pair("server_err", "Internal Server Error", &num_params, params);
+                    safely_update_into_arr_pair("server_err", "Internal Server Error", &num_params, params, 1);
                     send_file_to(conn, "login.html", NULL, num_params, params);
                     goto done;
                 }
@@ -934,19 +920,19 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                             if ((ses_append_status = snprintf(session_id_str + ses_len, sizeof(session_id_str) - ses_len, "%02x", session_id[i])) < 0) break;
                         }
                     }
-                    if (rand_status < 1 || ses_append_status < 0 || sqlite3_prepare_v2(db, "INSERT INTO sessions (id, uid, expires_at) SELECT ?, id, datetime('now', '+30 minutes') FROM users WHERE username = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, session_id_str, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE || safely_append_into_arr_pair("set_session", session_id_str, &num_params, params) < 1) {
+                    if (rand_status < 1 || ses_append_status < 0 || sqlite3_prepare_v2(db, "INSERT INTO sessions (id, uid, expires_at) SELECT ?, id, datetime('now', '+30 minutes') FROM users WHERE username = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, session_id_str, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE || safely_update_into_arr_pair("set_session", session_id_str, &num_params, params, 1) < 1) {
                         err(__FILE__, __LINE__, username, 0);
                         free(pwd);
                         printf("Session generating err: %s\n", sqlite3_errmsg(db));
                         sqlite3_close(db);
                         sqlite3_finalize(stmt);
-                        safely_append_into_arr_pair("server_err", "Could not generate session", &num_params, params);
+                        safely_update_into_arr_pair("server_err", "Could not generate session", &num_params, params, 1);
                         send_file_to(conn, "login.html", NULL, num_params, params);
                         goto done;
                     }
                     send_file_to(conn, "index.html", NULL, num_params, params);
                 } else {
-                    safely_append_into_arr_pair("invalid", "Invalid Password", &num_params, params);
+                    safely_update_into_arr_pair("invalid", "Invalid Password", &num_params, params, 1);
                     send_file_to(conn, "login.html", NULL, num_params, params);
                 }
                 free(username);
@@ -972,7 +958,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 pair set_session[1];
 
                 int set_ses_pair_len = 0;
-                safely_append_into_arr_pair("set_session", "", &set_ses_pair_len, set_session);
+                safely_update_into_arr_pair("set_session", "", &set_ses_pair_len, set_session, 1);
 
                 send_file_to(conn, "index.html", NULL, 1, set_session);
                 send_file_to(conn, "index.html", NULL, num_params, params);

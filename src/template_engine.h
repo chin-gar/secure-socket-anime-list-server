@@ -26,7 +26,7 @@ void remove_spaces_btwn(char *s);
 
 char *rendered_template(const char *html_buf, int param_count, pair *params);
 
-int safely_append_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params);
+int safely_update_into_arr_pair(const char *key, const char *val, int *len_ptr, pair *params, const int override_existing);
 
 char *search_keys_val_in(const char *key, int param_count, pair *params);
 
