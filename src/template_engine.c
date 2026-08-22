@@ -1,3 +1,5 @@
+#include <ctype.h>
+
 #include <errno.h>
 
 #include <json-c/json.h>
@@ -84,8 +86,10 @@ int decode(char *encoded) {
         if (encoded[i] == '+')
             encoded[i] = ' ';
         else if (encoded[i] == '%') {
+            if (!isxdigit(encoded[i + 1]) || !isxdigit(encoded[i + 2])) continue;
             char hex[3], *end;
             strlcpy(hex, &encoded[i + 1], 3);
+
             int decoded = strtol(hex, &end, 16);
             if (*end != '\0' || end == hex || strlen(hex) < 2) {
                 strlcpy(encoded, backup, sizeof(backup));
@@ -134,11 +138,12 @@ char *sanitize(const char *str) {
                 continue;
             default:
                 size_t added_bytes = str[i] >= 0 ? 3 + num_digits(str[i]) : 1;
-                clean = realloc(clean, strlen(clean) + added_bytes + 1);
-                if (!clean || (str[i] >= 0 ? snprintf(clean + strlen(clean), added_bytes + 1, "&#%i", str[i]) < 0 : snprintf(clean + strlen(clean), 2, "%c", str[i]) < 0)) {
+                char *tmp = realloc(clean, strlen(clean) + added_bytes + 1);
+                if (!tmp || (str[i] >= 0 ? snprintf(tmp + strlen(tmp), added_bytes + 1, "&#%i;", str[i]) < 0 : snprintf(tmp + strlen(tmp), 2, "%c", str[i]) < 0)) {
                     err(__FILE__, __LINE__, clean, 0);
                     return NULL;
                 }
+                clean = tmp;
         }
     }
     return clean;
@@ -194,7 +199,7 @@ node *get_block(const char *var) {
     return NULL;
 }
 
-// NOTE: Intended for stack use only. Pass in -1 or other negative values for new_total_size to let func handle max size
+// NOTE: Intended for stack use only. Pass in -1 or other negative values for new_total_size to let func handle max size for CHAR ARRAYS ONLY
 int append(char *str, const char *add, int new_total_size) {
     if (!str || !add) return 0;
     if (new_total_size < 0) new_total_size = sizeof(str);
@@ -208,7 +213,7 @@ int heap_append(char **str, const char *add, int new_total_size) {
     if (new_total_size < 0) new_total_size = strlen(*str) + strlen(add) + 1;
     char *temp = realloc(*str, new_total_size);
     if (!temp || !append(temp, add, new_total_size)) {
-        err(__FILE__, __LINE__, NULL, 0);
+        err(__FILE__, __LINE__, temp, 0);
         return -1;
     }
     *str = temp;
@@ -250,13 +255,13 @@ int safely_update_into_arr_pair(const char *key, const char *val, int *len_ptr, 
 
 void remove_spaces_btwn(char *s) {
     if (!s) return;
-    while (s[strlen(s) - 1] == ' ') s[strlen(s) - 1] = '\0';
+    while (s[0] != '\0' && s[strlen(s) - 1] == ' ') s[strlen(s) - 1] = '\0';
     while (s[0] == ' ') memmove(&s[0], &s[1], strlen(s));
 }
 
 void remove_outer_q_marks(char *s) {
     if (!s) return;
-    if (s[strlen(s) - 1] == '"') s[strlen(s) - 1] = '\0';
+    if (s[0] != '\0' && s[strlen(s) - 1] == '"') s[strlen(s) - 1] = '\0';
     if (s[0] == '"') memmove(&s[0], &s[1], strlen(s));
 }
 
@@ -363,7 +368,38 @@ lua_State *lua_param_stack(node *parent, const int param_count, const pair *para
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
-    luaL_openlibs(L);
+    luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
+    lua_pop(L, 1);
+
+    const char *blacklist_funcs[] = {
+        "assert",
+        "collectgarbage",
+        "dofile",
+        "error",
+        "ipairs",
+        "load",
+        "loadfile",
+        "next",
+        "pairs",
+        "ipairs",
+        "print",
+        "select",
+        "setmetatable",
+        "warn",
+        "xpcall"};
+    for (int i = 0, n = sizeof(blacklist_funcs) / sizeof(blacklist_funcs[0]); i < n; i++) {
+        lua_pushnil(L);
+        lua_setglobal(L, blacklist_funcs[i]);
+    }
+    luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);
+    lua_pop(L, 1);
+
+    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
+    lua_pop(L, 1);
+
+    luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1);
+    lua_pop(L, 1);
+
     for (int i = 0; i < param_count; i++) {
         char *key = NULL;
         if (!(key = params[i].key)) continue;
@@ -387,6 +423,50 @@ lua_State *lua_param_stack(node *parent, const int param_count, const pair *para
         lua_setglobal(L, key);
     }
     return L;
+}
+
+int call_lua_eval(lua_State *L, const char *return_this, const int param_count, const pair *params)
+{
+    if (luaL_loadstring(L, return_this) != LUA_OK) {
+        return -1;
+    }
+    int chunk = lua_gettop(L);
+
+    lua_newtable(L);
+    int env = lua_gettop(L);
+
+    const char *allow[] = {
+        "type",
+        "math",
+        "string",
+        "table",
+        "rawequal",
+        "rawlen",
+        "tonumber",
+        "tostring"
+    };
+
+    for (int i = 0, n = sizeof(allow) / sizeof(allow[0]); i < n; i++) {
+        lua_getglobal(L, allow[i]);
+        lua_setfield(L, env, allow[i]);
+    }
+
+    for (int i = 0; i < param_count; i++) {
+        if (params[i].key) {
+            lua_getglobal(L, params[i].key);
+            lua_setfield(L, env, params[i].key);
+        }
+    }
+
+    lua_pushvalue(L, env);
+    lua_setupvalue(L, chunk, 1);
+
+    lua_remove(L, env);
+
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        return -1;
+    }
+    return 1;
 }
 
 int parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
@@ -677,10 +757,13 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                 break;
             case FOR:
                 {
-                    int sep = strstr(child->content, " in ") - child->content;
-                    char it[sep + 1];
+                    char *sep = NULL;
+                    if (!child->content || !(sep = strstr(child->content, " in "))) continue;
+
+                    int int_sep = sep - child->content;
+                    char it[int_sep + 1];
                     strlcpy(it, child->content, sizeof(it));
-                    char *coll = &child->content[sep + 4];
+                    char *coll = &child->content[int_sep + 4];
                     if (!coll) continue;
 
                     remove_spaces_btwn(it);
@@ -692,7 +775,7 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                         switch (json_object_get_type(json_obj)) {
                             case json_type_object:
                                 json_object_object_foreach(json_obj, key, val) {
-                                    pair new_p[(param_count + 1) * sizeof(*params)];
+                                    pair new_p[param_count + 1];
                                     memcpy(new_p, params, param_count * sizeof(*params));
 
                                     new_p[param_count].key = strdup(it);
@@ -713,7 +796,7 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                                 break;
                             case json_type_array:
                                 for (int k = 0, n = json_object_array_length(json_obj); k < n; k++) {
-                                    pair new_p[(param_count + 1) * sizeof(*params)];
+                                    pair new_p[param_count + 1];
                                     memcpy(new_p, params, param_count * sizeof(*params));
 
                                     new_p[param_count].key = strdup(it);
@@ -737,7 +820,9 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                         }
                         json_object_put(json_obj);
                     } else if (strncmp(coll, "range(", 6) == 0) {
-                        int num_sep = strchr(coll, ',') - coll;
+                        char *s = strchr(coll, ',');
+                        if (!s) continue;
+                        int num_sep = s - coll;
 
                         char start_str[num_sep - 5];
                         strlcpy(start_str, &coll[6], sizeof(start_str));
@@ -760,7 +845,7 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
 
                         for (int i = start; i < end; i++) {
                             size_t val_size = num_digits(i) + 1;
-                            pair new_p[(param_count + 1) * sizeof(*params)];
+                            pair new_p[param_count + 1];
                             memcpy(new_p, params, param_count * sizeof(*params));
                             new_p[param_count].key = strdup(it);
                             new_p[param_count].value = malloc(val_size);
@@ -793,7 +878,7 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                     }
 
                     char return_what[7 + strlen(condition) + 1];
-                    if (snprintf(return_what, sizeof(return_what), "return %s", condition) < 0 || luaL_dostring(L, return_what) != LUA_OK) {
+                    if (snprintf(return_what, sizeof(return_what), "return %s", condition) < 0 || call_lua_eval(L, return_what, param_count, params) != 1) {
                         free_node_tree(parent);
                         err(__FILE__, __LINE__, NULL, 0);
                         lua_close(L);
@@ -822,7 +907,7 @@ void render(char **output, node *parent, int param_count, pair *params, int usin
                             lua_close(L);
                             return;
                         }
-                        int lua_succeeded = luaL_dostring(L, return_var) == LUA_OK;
+                        int lua_succeeded = call_lua_eval(L, return_var, param_count, params) > 0;
 
                         const char *to_str = lua_tostring(L, -1);
                         char *sanitized = NULL;

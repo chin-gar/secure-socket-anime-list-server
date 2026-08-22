@@ -28,6 +28,9 @@ As for the template engine, I just couldn't find a C HTML template engine that w
 >[!WARNING]
 >This project is not meant for production use; only for educational purposes. Web server libraries such as httplib.h handle the risks and issues that may arise from my manual networking/security approach to this project.
 
+>[!CAUTION]
+>The template engine uses the C Lua API, thus in the real world, the developer is responsible for reducing the likelihood for attackers to be able to modify/create any HTML templates with unsafe functions embedded as vars. The main purpose of embedding Lua is to allow a developer to return dynamic strings onto the HTML based off of math calculations, string manipulation/concatenation, etc. To support this intended goal, `call_lua_eval()` aims to replace C's `luaL_dostring()` to only allow essential Lua functions (ex. `tonumber()`) to be called in a template.
+
 # Security Features
 
 - HTML sanitization via `sanitized()` imported from template engine &rarr; mitigate malicious Javascript execution from suspicious user input (XSS/Cross-Site Scripting)

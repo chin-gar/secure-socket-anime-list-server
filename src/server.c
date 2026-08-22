@@ -72,9 +72,12 @@ typedef struct connection { // NOTE: Made to implement token bucket and pass pro
 
 // NOTE: 1 on success; 0 on failure
 int to_json_str_from_res(char **res_ptr) {
-    char *no_header = strstr(*res_ptr, "\r\n\r\n") + 4;
+    char *no_header = strstr(*res_ptr, "\r\n\r\n");
+    if (!no_header) return 0;
+    no_header += 4;
+
     char *json = strchr(no_header, '{');
-    if (!no_header || !json) return 0;
+    if (!json) return 0;
     if (!strstr(*res_ptr, "Transfer-Encoding: chunked\r\n")) {
         char *json_dup = strdup(json);
         if (!json_dup) {
@@ -134,7 +137,11 @@ char *http_req(const char *path, const char *host, const char *type, const char 
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
-    return snprintf(req, req_size, "%s %s HTTP/1.1\r\nConnection: close\r\nHost: %s\r\n\r\n%s", type, path, host, additional) >= 0 ? req : NULL;
+    int result = snprintf(req, req_size, "%s %s HTTP/1.1\r\nConnection: close\r\nHost: %s\r\n\r\n%s", type, path, host, additional) >= 0;
+    if (result) return req;
+
+    free(req);
+    return NULL;
 }
 
 void close_conn(connection *conn) {
@@ -174,6 +181,7 @@ void completely_send(connection *conn, const char *buf, const size_t len) {
 }
 
 // NOTE: Must be freed
+// TODO: Determine good max buffer length & modify read to read that
 char *recv_https_from_req(const char *path, const char *host, const char *type, const char *additional) {
     struct addrinfo hints, *res, *it;
     int api_fd = 0;
@@ -218,7 +226,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
         char *api_req = http_req(path, host, "GET", additional);
 
         char *buf = malloc(1);
-        if (SSL_set_tlsext_host_name(ssl, host) < 1 || SSL_connect(ssl) < 1 || !api_req || !buf) {
+        if (!SSL_set1_host(ssl, host) || !SSL_set_tlsext_host_name(ssl, host) || SSL_connect(ssl) != 1 || !api_req || !buf) {
             SSL_shutdown(ssl);
             SSL_free(ssl);
             err(__FILE__, __LINE__, api_req, 0);
@@ -233,16 +241,24 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
 
         int read_total = 0;
         while (1) {
-            char *tmp = realloc(buf, strlen(buf) + CHUNK_SIZE + 1);
+            //printf("buf: %s\nnew size: %i\n", buf, read_total + CHUNK_SIZE + 1);
+            char *tmp = realloc(buf, read_total + CHUNK_SIZE + 1);
             if (!tmp) {
+                free(buf);
+                buf = NULL;
                 break;
             }
             size_t read;
             int status = SSL_read_ex(ssl, &tmp[read_total], CHUNK_SIZE, &read);
-            tmp[read_total + read] = '\0';
-            buf = tmp;
-            if (status <= 0) break;
+            if (status != 1) {
+                buf = tmp;
+                buf[read_total] = '\0';
+                break;
+            }
             read_total += read;
+            tmp[read_total] = '\0';
+            buf = tmp;
+            if (read == 0) break;
         }
         SSL_shutdown(ssl);
         SSL_free(ssl);
@@ -304,7 +320,7 @@ void send_file_to(connection *conn, const char *name, const char *type, const in
         return;
     }
 
-    int len = 0, status = 200;
+    size_t len = 0, status = 200;
     size_t total = 0, sent = 0;
 
     FILE *f = fopen(p_name, "rb");
@@ -319,8 +335,7 @@ void send_file_to(connection *conn, const char *name, const char *type, const in
     }
 
     if (f != NULL) {
-        int s = fread(buf, len, 1, f);
-        if (s < 0) status = 404;
+        if (fread(buf, len, 1, f) < 0) status = 404;
         buf[len] = '\0';
         if (strcmp(type,"text/html") == 0) {
             char *tmp = rendered_template(buf, num_args, params);
@@ -369,7 +384,7 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
     built[0] = '\0';
 
     int building_key = 1;
-    pair temp[sizeof(pair)];
+    pair temp[1];
     temp[0].key = NULL;
     temp[0].value = NULL;
     for (int i = 0, n = strlen(queries); i < n && *len_ptr < MAX_PARAMS; i++) {
@@ -491,7 +506,11 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
 
     int status = -1;
     while (1) {
-        int status = SSL_read_ex(ssl, &r[bytes], CHUNK_SIZE, &received);
+        size_t remaining = MAX_HTTP_SIZE - bytes;
+        size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+        if (to_read <= 0) break;
+
+        int status = SSL_read_ex(ssl, &r[bytes], to_read, &received);
         if (status > 0) {
             bytes += received;
             r[bytes] = '\0';
@@ -647,7 +666,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_stmt *stmt = NULL;
                 if (sqlite3_open("data.db", &db) != SQLITE_OK || sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK) {
                     err(__FILE__, __LINE__, NULL, 0);
-                    if (safely_update_into_arr_pair("search_err", sqlite3_errmsg(db), &num_params, params, 1) < 1) {
+                    if (safely_update_into_arr_pair("search_err", "Couldn't fetch results...", &num_params, params, 1) < 1) {
                         send_file_to(conn, "500.html", NULL, num_params, params);
                     } else send_file_to(conn, "search.html", NULL, num_params, params);
                     sqlite3_finalize(stmt);
@@ -758,7 +777,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "POST ", 5) == 0) {
         //printf("%s\n", r);
-        char *post_body = strstr(r, "\r\n\r\n") + 4;
+        char *sep = strstr(r, "\r\n\r\n");
+        char *post_body = sep ? sep + 4 : NULL;
         // TODO: How should post & other req method errs be handled? What should they return?
         if (post_body && strcmp(post_body, "") != 0) {
             url_query_into_arr_pairs(post_body, &num_params, params);
@@ -850,6 +870,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
 
                     if (RAND_bytes(salt, salt_size) < 1) {
                         err(__FILE__, __LINE__, username, 0);
+                        OPENSSL_cleanse(pwd, strlen(pwd));
                         free(pwd);
                         sqlite3_finalize(stmt);
                         sqlite3_close(db);
@@ -859,6 +880,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     int encoded_status = argon2id_hash_encoded(1, 47104, 1, pwd, pwd_len, salt, salt_size, hash_size, encoded_hash, encoded_size);
                     if (encoded_status != ARGON2_OK) {
                         err(__FILE__, __LINE__, username, 0);
+                        OPENSSL_cleanse(pwd, strlen(pwd));
                         free(pwd);
                         printf("argon2id encoded hash failure: %s\n", argon2_error_message(encoded_status));
                         sqlite3_finalize(stmt);
@@ -868,6 +890,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
 
                     if (sqlite3_prepare_v2(db, "INSERT INTO users (username, pwd_hash) VALUES (?, ?);", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_text(stmt, 2, encoded_hash, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE) {
                         err(__FILE__, __LINE__, username, 0);
+                        OPENSSL_cleanse(pwd, strlen(pwd));
                         free(pwd);
                         printf("Statement preparation failure for signing up: %s\n", sqlite3_errmsg(db));
                         sqlite3_finalize(stmt);
@@ -877,6 +900,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     send_file_to(conn, "login.html", NULL, num_params, params);
                 }
                 free(username);
+                OPENSSL_cleanse(pwd, strlen(pwd));
                 free(pwd);
                 sqlite3_close(db);
                 sqlite3_finalize(stmt);
@@ -1001,7 +1025,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "DELETE ", 7) == 0) {
         //printf("%s\n", r);
-        char *del_body = strstr(r, "\r\n\r\n") + 4;
+        char *sep = strstr(r, "\r\n\r\n");
+        char *del_body = sep ? sep + 4 : NULL;
         if (del_body && strcmp(del_body, "") != 0) {
             url_query_into_arr_pairs(del_body, &num_params, params);
         }
@@ -1034,7 +1059,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "PATCH", 5) == 0) {
         //printf("%s\n", r);
-        char *patch_body = strstr(r, "\r\n\r\n") + 4;
+        char *sep = strstr(r, "\r\n\r\n");
+        char *patch_body = sep ? sep + 4 : NULL;
         if (patch_body && strcmp(patch_body, "") != 0) {
             url_query_into_arr_pairs(patch_body, &num_params, params);
         }
@@ -1169,7 +1195,6 @@ int main(void) {
         int wait;
         do {
             wait = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-            if (wait < 0) perror("epoll_wait");
         } while (wait < 0 && errno == EINTR);
         for (int i = 0; i < fd_size; i++) {
             if (events[i].data.fd == server_fd) {
