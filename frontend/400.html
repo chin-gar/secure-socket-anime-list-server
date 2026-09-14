@@ -5,7 +5,10 @@
 {% endblock %}
 
 {% block main %}
-  Error 400 Bad Request
-
-  <p>{{ (err_reason) and err_reason or "Malformed request" }}</p>
+  <br>
+  <h1 class="text-center text-3xl dark:text-white">Error 400 Bad Request</h1>
+  <div class="flex place-content-center h-[50vh]">
+    <img src="err_art.png">
+  </div>
+  <h2 class="text-center text-xl dark:text-white">{{ (err_reason) and err_reason or "Malformed request" }}</h2>
 {% endblock %}

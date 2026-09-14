@@ -5,7 +5,10 @@
 {% endblock %}
 
 {% block main %}
-  Error 404 Not Found
-
-  <p>{{ (err_reason) and err_reason or "Unknown page" }}</p>
+  <br>
+  <h1 class="text-center text-3xl dark:text-white">Error 404 Not Found</h1>
+  <div class="flex place-content-center h-[50vh]">
+    <img src="err_art.png">
+  </div>
+  <h2 class="text-center text-xl dark:text-white">{{ (err_reason) and err_reason or "Unknown page" }}</h2>
 {% endblock %}

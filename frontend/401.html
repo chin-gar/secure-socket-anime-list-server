@@ -5,7 +5,10 @@ Unauthorized
 {% endblock %}
 
 {% block main %}
-  Error 401 Unauthorized
-
-  <p>{{ (err_reason) and err_reason or "Not allowed to this page" }}</p>
+  <br>
+  <h1 class="text-center text-3xl dark:text-white">Error 401 Unauthorized</h1>
+  <div class="flex place-content-center h-[50vh]">
+    <img src="err_art.png">
+  </div>
+  <h2 class="text-center text-xl dark:text-white">{{ (err_reason) and err_reason or "Not allowed to this page" }}</h2>
 {% endblock %}

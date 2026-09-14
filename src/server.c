@@ -23,6 +23,7 @@
 #include <openssl/tls1.h>
 #include <pthread.h>
 #include <regex.h>
+#include <signal.h>
 #include <sqlite3.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -149,17 +150,19 @@ void close_conn(connection *conn) {
     conn->entry_ptr->active_connections--;
     fd_size--;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-    close(conn->fd);
     if (conn->ssl) {
         SSL_shutdown(conn->ssl);
         SSL_free(conn->ssl);
         conn->ssl = NULL;
     }
+    close(conn->fd);
+    conn->fd = -1;
     free(conn);
     conn = NULL;
 }
 
 void completely_send(connection *conn, const char *buf, const size_t len) {
+    if (!conn || !conn->ssl || (SSL_get_shutdown(conn->ssl) & SSL_RECEIVED_SHUTDOWN)) return;
     size_t sent = 0, total = 0;
     while (total < len) {
         int status = SSL_write_ex(conn->ssl, &buf[total], len - total, &sent);
@@ -170,12 +173,15 @@ void completely_send(connection *conn, const char *buf, const size_t len) {
         int err_code = SSL_get_error(conn->ssl, status);
         if (err_code == SSL_ERROR_WANT_READ) {
             ev.events = EPOLLIN;
+            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
             continue;
         } else if (err_code == SSL_ERROR_WANT_WRITE) {
             ev.events = EPOLLOUT;
+            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
             continue;
         }
-        close_conn(conn);
+        ERR_print_errors_fp(stderr);
+        //close_conn(conn);
         return;
     }
 }
@@ -281,11 +287,11 @@ char *http_res(const void *body, const char *type, const int content_len, int st
         return NULL;
     }
 
-    int h_len = 21 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 2);
+    int h_len = 19 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 2);
     //int h_len = 21 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info);
     int res_size = h_len + content_len + 1;
     char *res = malloc(res_size);
-    if (!res || snprintf(res, h_len, "HTTP/1.1 %i\r\n%s\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str, more_header_info) < 0) {
+    if (!res || snprintf(res, h_len, "HTTP/1.1 %i\r\n%s\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str, more_header_info) < 0 || (strlen(more_header_info) > 0 && snprintf(res + strlen(res), 3, "\r\n") < 0)) {
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
@@ -297,9 +303,9 @@ char *http_res(const void *body, const char *type, const int content_len, int st
         return snprintf(res + current_len, 3, "\r\n") >= 0 ? res : NULL;
     } else if (strncmp(type, "text", 4) == 0 || strcmp(type, "application/json") == 0) {
         int current_len = strlen(res);
-        return snprintf(res + current_len, res_size - current_len, "\r\n%s", (char *) body) >= 0 ? res : NULL;;
+        return snprintf(res + current_len, res_size - current_len, "%s", (char *) body) >= 0 ? res : NULL;;
     } else {
-        memcpy(res + h_len - 1, body, content_len);
+        memcpy(res + h_len - 1, (uint8_t *) body, content_len);
     }
     return res;
 }
@@ -353,14 +359,14 @@ void send_file_to(connection *conn, const char *name, const char *type, const in
 
     if (!sid || (sid && snprintf(set_cookie, sizeof(set_cookie), "Set-Cookie: session=%s; HttpOnly; SameSite=Lax; Secure", sid) < 0)) set_cookie[0] = '\0';
 
-    char *res = http_res(buf, type, len + 1, status, set_cookie);
+    char *res = http_res(buf, type, len, status, set_cookie);
     if (!res) {
         err(__FILE__, __LINE__, buf, 0);
         free(sid);
         return;
     }
     int res_len = strncmp(type, "text", 4) == 0 ? strlen(res) : len + strlen(res);
-    for (int i = 0; i < (sid ? 2 : 1); i++) completely_send(conn, res, res_len + 1); // NOTE: multiprint = temp workaround problem where epoll_wait hangs when HTTP req w/ set_session
+    for (int i = 0; i < (sid ? 2 : 1); i++) completely_send(conn, res, res_len); // NOTE: multiprint = temp workaround problem where epoll_wait hangs when HTTP req w/ set_session
     free(sid);
     free(buf);
     free(res);
@@ -463,7 +469,7 @@ int consume_bucket(connection *conn, const int num_tokens_to_consume) {
 
 void *rm_expired_sessions(void *arg) { // NOTE: arg = ip_entry[]
     struct ip_entries_as_func_param *params = (struct ip_entries_as_func_param *) arg;
-    struct ip_entry *ip_entries = (struct ip_entry *) params->entries;
+    struct ip_entry **ip_entries = params->entries;
 
     // TODO: Is opening data.db once and leaving it open gonna cause db access conflicts?
     sqlite3 *db = NULL;
@@ -481,8 +487,8 @@ void *rm_expired_sessions(void *arg) { // NOTE: arg = ip_entry[]
         }
         for (int i = 0, n = *(params->num_ips_ptr); i < n; i++) {
             time_t now = time(NULL);
-            if (ip_entries[i].active_connections <= 0 && difftime(mktime(gmtime(&now)), ip_entries[i].last_connected) / 60 >= 30) {
-                free(ip_entries[i].ip);
+            if (ip_entries[i]->active_connections <= 0 && difftime(mktime(gmtime(&now)), ip_entries[i]->last_connected) / 60 >= 30) {
+                free(ip_entries[i]->ip);
                 (*(params->num_ips_ptr))--;
                 memmove(&ip_entries[i], &ip_entries[i + 1], sizeof(*ip_entries) * (n - i - 1));
                 i--;
@@ -493,6 +499,44 @@ void *rm_expired_sessions(void *arg) { // NOTE: arg = ip_entry[]
     }
     sqlite3_close(db);
     return NULL;
+}
+
+void goto_index_html(connection *conn, int num_params, pair *params, const int uid) {
+    char *buf = NULL;
+    if (!(buf = recv_https_from_req("/api/edge/trending/anime?page[limit]=10", API_URL, "GET", NULL)) || !to_json_str_from_res(&buf) || safely_update_into_arr_pair("trending", buf, &num_params, params, 1) < 1) {
+        send_file_to(conn, "index.html", NULL, num_params, params);
+        err(__FILE__, __LINE__, buf, 0);
+        return;
+    }
+    free(buf);
+
+    char *session = NULL;
+    char *set_session = NULL;
+    if ((((session = search_keys_val_in("session", num_params, params)) && strcmp(session, "") != 0) || ((set_session = search_keys_val_in("set_session", num_params, params)) && strcmp(set_session, "") != 0)) && uid > 0) {
+        sqlite3 *db = NULL;
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_open("data.db", &db) != SQLITE_OK || sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK) {
+            err(__FILE__, __LINE__, NULL, 0);
+            if (safely_update_into_arr_pair("search_err", "Couldn't fetch results...", &num_params, params, 1) < 1) {
+                send_file_to(conn, "500.html", NULL, num_params, params);
+            } else send_file_to(conn, "search.html", NULL, num_params, params);
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+            return;
+        }
+
+        struct json_object *anime_list = json_object_new_object();
+        while (anime_list && sqlite3_step(stmt) == SQLITE_ROW) {
+            json_object_object_add(anime_list, (char *) sqlite3_column_text(stmt, 0), json_object_new_int(sqlite3_column_int(stmt, 1))); // 1st column guaranteed to not be NULL bc .schema progress;
+        }
+        if (json_object_object_length(anime_list) > 0) {
+            safely_update_into_arr_pair("list", json_object_to_json_string_ext(anime_list, JSON_C_TO_STRING_NOSLASHESCAPE), &num_params, params, 1);
+        }
+        json_object_put(anime_list);
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+    }
+    send_file_to(conn, "index.html", NULL, num_params, params);
 }
 
 void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
@@ -625,8 +669,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
         }
         //printf("%surl: %s from %i\nnum bytes: %li\nr len: %li\n", r, url, cli, bytes, strlen(r));
         // TODO: Set limit of num params to prevent function overload
-        if (strcmp(url, "/") == 0) {
-            if (consume_bucket(conn, 1)) send_file_to(conn, "index.html", NULL, num_params, params);
+        if (strcmp(url, "/") == 0 && consume_bucket(conn, 1)) {
+            goto_index_html(conn, num_params, params, uid);
         } else if (strcmp(url, "/favicon.ico") == 0) {
             send_file_to(conn, "favicon.ico", "image/x-icon", 0);
         } else if (strcmp(url, "/styles.css") == 0) {
@@ -637,6 +681,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             if (strcmp(session, "") == 0)
                 send_file_to(conn, "signup.html", NULL, num_params, params);
             else send_file_to(conn, "401.html", NULL, num_params, params);
+        } else if (strcmp(url, "/err_art.png") == 0) {
+            send_file_to(conn, "err_art.png", "image/png", 0);
         } else if (strcmp(url, "/login") == 0 && consume_bucket(conn, 3)) {
             if (strcmp(session, "") == 0)
                 send_file_to(conn, "login.html", NULL, num_params, params);
@@ -682,8 +728,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     safely_update_into_arr_pair("list", json_object_to_json_string_ext(anime_list, JSON_C_TO_STRING_NOSLASHESCAPE), &num_params, params, 1);
                 }
                 json_object_put(anime_list);
-                sqlite3_close(db);
                 sqlite3_finalize(stmt);
+                sqlite3_close(db);
             }
             send_file_to(conn, "search.html", NULL, num_params, params);
         } else if (strncmp(url, "/list", 5) == 0 && consume_bucket(conn, 3)) {
@@ -733,8 +779,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 if (title ? (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? AND title LIKE ? ORDER BY i DESC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) : (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? ORDER BY i ASC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_int(stmt, 2, offset) != SQLITE_OK)) {
                     err(__FILE__, __LINE__, NULL, 0);
                     printf("List prep err: %s\n", sqlite3_errmsg(db));
-                    sqlite3_close(db);
                     sqlite3_finalize(stmt);
+                    sqlite3_close(db);
                     send_file_to(conn, "500.html", NULL, num_params, params);
                     goto done;
                 }
@@ -771,8 +817,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     send_file_to(conn, "500.html", NULL, num_params, params);
                 }
 
-                sqlite3_close(db);
                 sqlite3_finalize(stmt);
+                sqlite3_close(db);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "POST ", 5) == 0) {
@@ -902,8 +948,8 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 free(username);
                 OPENSSL_cleanse(pwd, strlen(pwd));
                 free(pwd);
-                sqlite3_close(db);
                 sqlite3_finalize(stmt);
+                sqlite3_close(db);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else if (strncmp(url, "/login", 6) == 0 && consume_bucket(conn, 20)) {
             // 20 seconds to refill, punishes brute-forcers HARSHLY
@@ -944,25 +990,28 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                             if ((ses_append_status = snprintf(session_id_str + ses_len, sizeof(session_id_str) - ses_len, "%02x", session_id[i])) < 0) break;
                         }
                     }
-                    if (rand_status < 1 || ses_append_status < 0 || sqlite3_prepare_v2(db, "INSERT INTO sessions (id, uid, expires_at) SELECT ?, id, datetime('now', '+30 minutes') FROM users WHERE username = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, session_id_str, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE || safely_update_into_arr_pair("set_session", session_id_str, &num_params, params, 1) < 1) {
+                    if (rand_status < 1 || ses_append_status < 0 || sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = ? LIMIT 1;", -1, &stmt, NULL) || sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_ROW || (uid = sqlite3_column_int(stmt, 0)) < 0 || sqlite3_reset(stmt) != SQLITE_OK || sqlite3_prepare_v2(db, "INSERT INTO sessions (id, uid, expires_at) SELECT ?, id, datetime('now', '+30 minutes') FROM users WHERE username = ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_text(stmt, 1, session_id_str, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE || safely_update_into_arr_pair("set_session", session_id_str, &num_params, params, 1) < 1) {
                         err(__FILE__, __LINE__, username, 0);
                         free(pwd);
                         printf("Session generating err: %s\n", sqlite3_errmsg(db));
-                        sqlite3_close(db);
                         sqlite3_finalize(stmt);
+                        sqlite3_close(db);
                         safely_update_into_arr_pair("server_err", "Could not generate session", &num_params, params, 1);
                         send_file_to(conn, "login.html", NULL, num_params, params);
                         goto done;
                     }
-                    send_file_to(conn, "index.html", NULL, num_params, params);
+                    //send_file_to(conn, "index.html", NULL, num_params, params);
+                    //goto_index_html(conn, num_params, params, session, uid);
+                    //send_file_to(conn, "index.html", NULL, 1, "set_session");
+                    goto_index_html(conn, num_params, params, uid);
                 } else {
                     safely_update_into_arr_pair("invalid", "Invalid Password", &num_params, params, 1);
                     send_file_to(conn, "login.html", NULL, num_params, params);
                 }
                 free(username);
                 free(pwd);
-                sqlite3_close(db);
                 sqlite3_finalize(stmt);
+                sqlite3_close(db);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else if (strncmp(url, "/logout", 7) == 0 && consume_bucket(conn, 10)) {
             if (strcmp(session, "") != 0) {
@@ -975,20 +1024,20 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
                     char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
-                    completely_send(conn, res, strlen(res) + 1);
+                    completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
                 }
-                pair set_session[1];
+                sqlite3_finalize(stmt);
+                sqlite3_close(db);
 
+                pair set_session[1];
                 int set_ses_pair_len = 0;
                 safely_update_into_arr_pair("set_session", "", &set_ses_pair_len, set_session, 1);
 
-                send_file_to(conn, "index.html", NULL, 1, set_session);
-                send_file_to(conn, "index.html", NULL, num_params, params);
+                goto_index_html(conn, 1, set_session, uid);
+                goto_index_html(conn, num_params, params, -1);
 
-                sqlite3_finalize(stmt);
-                sqlite3_close(db);
                 free(set_session[0].key);
                 free(set_session[0].value);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
@@ -1010,7 +1059,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
-                    completely_send(conn, res, strlen(res) + 1);
+                    completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
                 }
@@ -1019,7 +1068,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
-                completely_send(conn, res, strlen(res) + 1);
+                completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
@@ -1045,7 +1094,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
-                    completely_send(conn, res, strlen(res) + 1);
+                    completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
                 }
@@ -1053,7 +1102,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
-                completely_send(conn, res, strlen(res) + 1);
+                completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
@@ -1082,7 +1131,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
-                    completely_send(conn, res, strlen(res) + 1);
+                    completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
                 }
@@ -1090,7 +1139,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
-                completely_send(conn, res, strlen(res) + 1);
+                completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
@@ -1105,6 +1154,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
 }
 
 int main(void) {
+    signal(SIGPIPE, SIG_IGN);
     struct sockaddr_in ip_port;
     ip_port.sin_family = AF_INET;
     ip_port.sin_addr.s_addr = inet_addr("0.0.0.0");
@@ -1160,7 +1210,7 @@ int main(void) {
     SSL_CTX_set_timeout(sctx, 3600);
     SSL_CTX_set_verify(sctx, SSL_VERIFY_NONE, NULL);
 
-    struct ip_entry *ip_entries;
+    struct ip_entry **ip_entries;
     int ips = 0;
 
     if (!(ip_entries = malloc(sizeof(*ip_entries)))) {
@@ -1182,7 +1232,7 @@ int main(void) {
     }
 
     struct ip_entries_as_func_param rm_args;
-    rm_args.entries = &ip_entries;
+    rm_args.entries = ip_entries;
     rm_args.num_ips_ptr = &ips;
 
     pthread_mutex_init(&lock, NULL);
@@ -1196,7 +1246,7 @@ int main(void) {
         do {
             wait = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         } while (wait < 0 && errno == EINTR);
-        for (int i = 0; i < fd_size; i++) {
+        for (int i = 0; i < wait; i++) {
             if (events[i].data.fd == server_fd) {
                 int cli = accept(server_fd, (struct sockaddr *) &ip_port, &t);
                 SSL *ssl = SSL_new(sctx);
@@ -1210,7 +1260,6 @@ int main(void) {
                     }
                     continue;
                 }
-                fcntl(cli, F_SETFL, O_NONBLOCK);
                 SSL_set_fd(ssl, cli);
 
                 struct connection *c = malloc(sizeof(connection));
@@ -1225,6 +1274,7 @@ int main(void) {
                         break;
                     }
                 }
+                fcntl(cli, F_SETFL, O_NONBLOCK);
                 if (cancel_cli || !c) {
                     if (!cancel_cli) err(__FILE__, __LINE__, NULL, 0);
                     close(cli);
@@ -1246,8 +1296,8 @@ int main(void) {
                 int got_entry = 0;
                 char *ip = inet_ntoa(client_addr.sin_addr);
                 for (int i = 0, n = ips; i < n; i++) {
-                    if (strcmp(ip_entries[i].ip, ip) == 0) {
-                        entry = &(ip_entries[i]);
+                    if (strcmp(ip_entries[i]->ip, ip) == 0) {
+                        entry = ip_entries[i];
                         got_entry = 1;
                         break;
                     }
@@ -1267,14 +1317,14 @@ int main(void) {
                     entry->bucket.max_capacity = 100; // NOTE: Maximum requests/minute for most common req purpose: simple page navigation; multiple tokens consumed for pwd guessing/search queries
                     entry->bucket.tokens = 100;
 
-                    struct ip_entry *tmp = realloc(ip_entries, (ips + 1) * sizeof(*ip_entries));
+                    struct ip_entry **tmp = realloc(ip_entries, (ips + 1) * sizeof(*ip_entries));
                     if (!tmp) {
                         close(cli);
                         err(__FILE__, __LINE__, tmp, 0);
                         continue;
                     }
                     ip_entries = tmp;
-                    ip_entries[ips++] = *entry;
+                    ip_entries[ips++] = entry;
                 }
                 c->entry_ptr = entry;
                 c->ssl = ssl;
@@ -1291,6 +1341,11 @@ int main(void) {
                 entry->active_connections++;
             } else {
                 if (events[i].data.ptr && (connection *) events[i].data.ptr) {
+                    // pthread_t thr;
+                    // if (pthread_create(&thr, NULL, handle, events[i].data.ptr) == 0) {
+                    //     pthread_mutex_lock(&lock);
+                    //     pthread_detach(thr);
+                    // }
                     pthread_mutex_lock(&lock);
                     handle(events[i].data.ptr);
                     pthread_mutex_unlock(&lock);
@@ -1302,7 +1357,7 @@ int main(void) {
     close(server_fd);
     close(epoll_fd);
     for (int i = 0; i < ips; i++) {
-        free(ip_entries[i].ip);
+        free(ip_entries[i]->ip);
     }
     free(ip_entries);
     SSL_CTX_free(ctx);

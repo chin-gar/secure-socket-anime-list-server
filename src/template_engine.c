@@ -59,7 +59,7 @@ void free_node_tree(node *root) {
     free(root->content);
     if (root->children) {
         for (int i = 0, n = root->num_children; i < n; i++) {
-            free_node_tree(root->children[i]);
+            if (root->children[i]) free_node_tree(root->children[i]);
         }
     }
     if (root->type == IF && root->num_sec_children > 0) {
