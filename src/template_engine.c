@@ -86,17 +86,17 @@ int decode(char *encoded) {
         if (encoded[i] == '+')
             encoded[i] = ' ';
         else if (encoded[i] == '%') {
-            if (!isxdigit(encoded[i + 1]) || !isxdigit(encoded[i + 2])) continue;
+            if (!isxdigit((unsigned char) encoded[i + 1]) || !isxdigit((unsigned char) encoded[i + 2])) continue;
             char hex[3], *end;
             strlcpy(hex, &encoded[i + 1], 3);
 
             int decoded = strtol(hex, &end, 16);
             if (*end != '\0' || end == hex || strlen(hex) < 2) {
-                strlcpy(encoded, backup, sizeof(backup));
+                strlcpy(encoded, backup, sizeof(encoded));
                 return 0;
             }
             encoded[i] = decoded;
-            memmove(&encoded[i + 1], &encoded[i + 3], strlen(encoded) - 2);
+            memmove(&encoded[i + 1], &encoded[i + 3], strlen(encoded) - (i + 3) + 1);
         }
     }
     return 1;
@@ -247,7 +247,8 @@ int safely_update_into_arr_pair(const char *key, const char *val, int *len_ptr, 
             }
         }
     }
-    if (!(params[*len_ptr].key = strdup(key)) || !(val && (params[*len_ptr].value = strdup(val)))) return -1;
+    if (!(params[*len_ptr].key = strdup(key))) return -1;
+    if (!(val && (params[*len_ptr].value = strdup(val)))) return -1;
     if (!val) params[*len_ptr].value = NULL;
     (*len_ptr)++;
     return 1;
@@ -308,8 +309,8 @@ json_object *get_json_obj(const char *q, const int param_count, pair *params) {
                 memset(btwn, '\0', sizeof(btwn));
                 index += inc;
             } else {
-                char ch = q[index];
-                if (append(btwn, &ch, strlen(btwn) + 2) < 1) {
+                char ch[2] = {q[index], '\0'};
+                if (append(btwn, ch, strlen(btwn) + 2) < 1) {
                     json_object_put(obj);
                     err(__FILE__, __LINE__, json_str, 0);
                     return NULL;
@@ -611,8 +612,8 @@ int parse_node_tree(node *doc, const char *html_buf, char **extends_from) {
                     return -1;
                 }
             }
-            char c = html_buf[i];
-            if (heap_append(&built, &c, strlen(built) + 2) < 1) {
+            char c[2] = {html_buf[i], '\0'};
+            if (heap_append(&built, c, strlen(built) + 2) < 1) {
                 free_node_tree(doc);
                 free(stack);
                 free_token_list(tokenlist, num_tokens);

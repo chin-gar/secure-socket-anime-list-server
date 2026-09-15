@@ -13,6 +13,7 @@ As for the template engine, I just couldn't find a C HTML template engine that w
 ![Search](docs/search.png)
 ![Signing up](docs/signup.png)
 ![List](docs/list.png)
+![Error 429](docs/429.png)
 
 # Features
 

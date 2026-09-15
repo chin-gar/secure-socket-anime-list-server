@@ -287,17 +287,13 @@ char *http_res(const void *body, const char *type, const int content_len, int st
         return NULL;
     }
 
-    int h_len = 19 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 2);
-    //int h_len = 21 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info);
+    int h_len = 21 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 0);
     int res_size = h_len + content_len + 1;
     char *res = malloc(res_size);
     if (!res || snprintf(res, h_len, "HTTP/1.1 %i\r\n%s\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str, more_header_info) < 0 || (strlen(more_header_info) > 0 && snprintf(res + strlen(res), 3, "\r\n") < 0)) {
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
-    // FIXME: Res only valid w/ header & body sep being 3 \r\n's (haven't observed w/ more_header_info)
-    //sprintf(res, "HTTP/1.1 %i\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str);
-    //if (strlen(more_header_info) > 0) sprintf(res, "%s%s\r\n", res, more_header_info);
     if (400 <= status && status < 600) {
         int current_len = strlen(res);
         return snprintf(res + current_len, 3, "\r\n") >= 0 ? res : NULL;
@@ -409,8 +405,8 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
         }
         if (building_key == 0 && temp[0].key && (i == n - 1 || queries[i] == '&')) {
             if (i == n - 1) {
-                char ch = queries[i];
-                if (!append(built, &ch, strlen(built) + 2)) {
+                char ch[2] = {queries[i], '\0'};
+                if (!append(built, ch, strlen(built) + 2)) {
                     err(__FILE__, __LINE__, queries, 0);
                     free(temp[0].key);
                     free(temp[0].value);
@@ -418,8 +414,7 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
                 }
             }
             building_key = 1;
-            temp[0].value = strdup(built);
-            if (temp[0].value) decode(temp[0].value);
+            if ((temp[0].value = strdup(built))) decode(temp[0].value);
             if (!temp[0].value || safely_update_into_arr_pair(temp[0].key, temp[0].value, len_ptr, p, 0) < 1) {
                 err(__FILE__, __LINE__, queries, 0);
                 free(temp[0].key);
@@ -432,8 +427,8 @@ int url_query_into_arr_pairs(const char *query_str, int *len_ptr, pair *p) {
             modified_temp = 1;
         }
         if (modified_temp == 0) {
-            char ch = queries[i];
-            if (!append(built, &ch, strlen(built) + 2)) {
+            char ch[2] = {queries[i], '\0'};
+            if (!append(built, ch, strlen(built) + 2)) {
                 err(__FILE__, __LINE__, queries, 0);
                 free(temp[0].key);
                 free(temp[0].value);
@@ -667,7 +662,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             send_file_to(conn, "500.html", NULL, num_params, params);
             goto done;
         }
-        //printf("%surl: %s from %i\nnum bytes: %li\nr len: %li\n", r, url, cli, bytes, strlen(r));
         // TODO: Set limit of num params to prevent function overload
         if (strcmp(url, "/") == 0 && consume_bucket(conn, 1)) {
             goto_index_html(conn, num_params, params, uid);
@@ -765,7 +759,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 pattern[0] = '\0';
 
                 int step = -1;
-                if ((title && snprintf(pattern, sizeof(pattern), "%%%s%%", title) < 0) || (title ? (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM (SELECT * FROM progress WHERE uid = ? AND title LIKE ? ORDER BY i DESC LIMIT 20 OFFSET ?);", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) : (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM (SELECT * FROM progress WHERE uid = ? ORDER BY i ASC LIMIT 20 OFFSET ?);", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_int(stmt, 2, offset) != SQLITE_OK)) || ((step = sqlite3_step(stmt)) != SQLITE_ROW && step != SQLITE_DONE)) {
+                if ((title && snprintf(pattern, sizeof(pattern), "%%%s%%", title) < 0) || (title ? (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM (SELECT * FROM progress WHERE uid = ? AND title LIKE ? ORDER BY i DESC LIMIT 20 OFFSET ?);", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) : (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM (SELECT * FROM progress WHERE uid = ? ORDER BY i DESC LIMIT 20 OFFSET ?);", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_int(stmt, 2, offset) != SQLITE_OK)) || ((step = sqlite3_step(stmt)) != SQLITE_ROW && step != SQLITE_DONE)) {
                     err(__FILE__, __LINE__, NULL, 0);
                     printf("List # prep err: %s\n", sqlite3_errmsg(db));
                     sqlite3_finalize(stmt);
@@ -776,7 +770,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 int size = sqlite3_column_int(stmt, 0);
                 sqlite3_reset(stmt);
 
-                if (title ? (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? AND title LIKE ? ORDER BY i DESC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) : (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? ORDER BY i ASC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_int(stmt, 2, offset) != SQLITE_OK)) {
+                if (title ? (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? AND title LIKE ? ORDER BY i DESC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC) != SQLITE_OK || sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) : (sqlite3_prepare_v2(db, "SELECT anime_id, episodes_watched FROM progress WHERE uid = ? ORDER BY i DESC LIMIT 20 OFFSET ?;", -1, &stmt, NULL) != SQLITE_OK || sqlite3_bind_int(stmt, 1, uid) != SQLITE_OK || sqlite3_bind_int(stmt, 2, offset) != SQLITE_OK)) {
                     err(__FILE__, __LINE__, NULL, 0);
                     printf("List prep err: %s\n", sqlite3_errmsg(db));
                     sqlite3_finalize(stmt);
@@ -822,7 +816,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "POST ", 5) == 0) {
-        //printf("%s\n", r);
         char *sep = strstr(r, "\r\n\r\n");
         char *post_body = sep ? sep + 4 : NULL;
         // TODO: How should post & other req method errs be handled? What should they return?
@@ -1000,9 +993,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                         send_file_to(conn, "login.html", NULL, num_params, params);
                         goto done;
                     }
-                    //send_file_to(conn, "index.html", NULL, num_params, params);
-                    //goto_index_html(conn, num_params, params, session, uid);
-                    //send_file_to(conn, "index.html", NULL, 1, "set_session");
                     goto_index_html(conn, num_params, params, uid);
                 } else {
                     safely_update_into_arr_pair("invalid", "Invalid Password", &num_params, params, 1);
@@ -1058,7 +1048,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
 
-                    char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
+                    char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
                     completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
@@ -1067,13 +1057,12 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
 
-                char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
+                char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
                 completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "DELETE ", 7) == 0) {
-        //printf("%s\n", r);
         char *sep = strstr(r, "\r\n\r\n");
         char *del_body = sep ? sep + 4 : NULL;
         if (del_body && strcmp(del_body, "") != 0) {
@@ -1093,7 +1082,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
 
-                    char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
+                    char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
                     completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
@@ -1101,13 +1090,12 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
 
-                char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
+                char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
                 completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "PATCH", 5) == 0) {
-        //printf("%s\n", r);
         char *sep = strstr(r, "\r\n\r\n");
         char *patch_body = sep ? sep + 4 : NULL;
         if (patch_body && strcmp(patch_body, "") != 0) {
@@ -1130,7 +1118,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
 
-                    char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
+                    char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
                     completely_send(conn, res, strlen(res));
                     free(res);
                     goto done;
@@ -1138,7 +1126,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
 
-                char *res = http_res("{\"success\": true}", "application/json", 19, 200, "");
+                char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
                 completely_send(conn, res, strlen(res));
                 free(res);
             } else send_file_to(conn, "401.html", NULL, num_params, params);
@@ -1341,11 +1329,6 @@ int main(void) {
                 entry->active_connections++;
             } else {
                 if (events[i].data.ptr && (connection *) events[i].data.ptr) {
-                    // pthread_t thr;
-                    // if (pthread_create(&thr, NULL, handle, events[i].data.ptr) == 0) {
-                    //     pthread_mutex_lock(&lock);
-                    //     pthread_detach(thr);
-                    // }
                     pthread_mutex_lock(&lock);
                     handle(events[i].data.ptr);
                     pthread_mutex_unlock(&lock);
