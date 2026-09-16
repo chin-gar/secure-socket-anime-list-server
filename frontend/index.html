@@ -18,17 +18,17 @@
                         <p class="w-full h-full absolute text-center text-sm content-center">{{ list and list[tostring(entry.id)] or 0 }}{{ entry.attributes.episodeCount and "/"..entry.attributes.episodeCount }} episode{{ entry.attributes.episodeCount ~= 1 and "s" }} watched</p>
                         </div>
                         <button id={{ "addRm"..entry.id }} onclick={{ session and (list and list[tostring(entry.id)] and "rmFromList("..entry.id..")" or "addToList("..entry.id..")") or "window.location.href = '/login'"  }} class={{ "rounded-bl-lg rounded-br-lg w-full flex flex-row justify-evenly p-2 cursor-pointer bg-"..(list and list[tostring(entry.id)] and "red-400" or "pink-100" ).."/75" }}>
-                        {% if session %}
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
-                            <path fill-rule="evenodd" d={{ list and list[tostring(entry.id)] and "M4.25 12a.75.75 0 0 1 .75-.75h14a.75.75 0 0 1 0 1.5H5a.75.75 0 0 1-.75-.75Z" or "M12 3.75a.75.75 0 0 1 .75.75v6.75h6.75a.75.75 0 0 1 0 1.5h-6.75v6.75a.75.75 0 0 1-1.5 0v-6.75H4.5a.75.75 0 0 1 0-1.5h6.75V4.5a.75.75 0 0 1 .75-.75Z" }} clip-rule="evenodd" />
-                            </svg>
-                            <p class="mr-4">{{ (list and list[tostring(entry.id)]) and "Remove from list" or "Add to list" }}</p>
-                        {% else %}
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
-                            <path fill-rule="evenodd" d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v3a3 3 0 0 0-3 3v6.75a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3v-6.75a3 3 0 0 0-3-3v-3c0-2.9-2.35-5.25-5.25-5.25Zm3.75 8.25v-3a3.75 3.75 0 1 0-7.5 0v3h7.5Z" clip-rule="evenodd" />
-                            </svg>
-                            <p class="mr-4">Must sign in</p>
-                        {% endif %}
+                            {% if session %}
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
+                                <path fill-rule="evenodd" d={{ list and list[tostring(entry.id)] and "M4.25 12a.75.75 0 0 1 .75-.75h14a.75.75 0 0 1 0 1.5H5a.75.75 0 0 1-.75-.75Z" or "M12 3.75a.75.75 0 0 1 .75.75v6.75h6.75a.75.75 0 0 1 0 1.5h-6.75v6.75a.75.75 0 0 1-1.5 0v-6.75H4.5a.75.75 0 0 1 0-1.5h6.75V4.5a.75.75 0 0 1 .75-.75Z" }} clip-rule="evenodd" />
+                                </svg>
+                                <p class="mr-4">{{ (list and list[tostring(entry.id)]) and "Remove from list" or "Add to list" }}</p>
+                            {% else %}
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-6">
+                                <path fill-rule="evenodd" d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v3a3 3 0 0 0-3 3v6.75a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3v-6.75a3 3 0 0 0-3-3v-3c0-2.9-2.35-5.25-5.25-5.25Zm3.75 8.25v-3a3.75 3.75 0 1 0-7.5 0v3h7.5Z" clip-rule="evenodd" />
+                                </svg>
+                                <p class="mr-4">Must sign in</p>
+                            {% endif %}
                         </button>
                     </div>
                 {% endfor %}
