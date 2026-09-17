@@ -180,8 +180,7 @@ void completely_send(connection *conn, const char *buf, const size_t len) {
             epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
             continue;
         }
-        ERR_print_errors_fp(stderr);
-        //close_conn(conn);
+        close_conn(conn);
         return;
     }
 }
@@ -1246,6 +1245,8 @@ int main(void) {
                         SSL_free(ssl);
                         ssl = NULL;
                     }
+                    if (cli == -1 && errno == EAGAIN) break;
+                    sleep(1);
                     continue;
                 }
                 SSL_set_fd(ssl, cli);
