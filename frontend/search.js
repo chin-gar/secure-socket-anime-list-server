@@ -1,7 +1,6 @@
 function addToList(anime_id) {
     if (anime_id) {
         const title = document.getElementById(anime_id+"Title")?.innerText;
-        console.log(title)
         fetch("/add", {
             method: "POST",
             headers: {
@@ -9,12 +8,8 @@ function addToList(anime_id) {
             },
             body: title ? new URLSearchParams({anime_id: anime_id, title: title}) : new URLSearchParams({anime_id: anime_id})
         }).then(async(response) => {
-            console.log("res")
-            console.log(response.ok)
             if (response.ok) {
-                console.log("yes")
                 let button = document.getElementById("addRm" + anime_id);
-                console.log(button)
                 button.setAttribute("onclick", "rmFromList(" + anime_id + ")");
                 button.classList.replace("bg-pink-100/75", "bg-red-400/75");
                 button.querySelector('svg').querySelector('path').setAttribute("d", "M4.25 12a.75.75 0 0 1 .75-.75h14a.75.75 0 0 1 0 1.5H5a.75.75 0 0 1-.75-.75Z");
@@ -33,7 +28,6 @@ function rmFromList(anime_id) {
             },
             body: new URLSearchParams({anime_id: anime_id})
         }).then(async(response) => {
-            console.log("rem")
             if (response.ok) {
                 let button = document.getElementById("addRm" + anime_id);
                 button.setAttribute("onclick", "addToList(" + anime_id + ")");

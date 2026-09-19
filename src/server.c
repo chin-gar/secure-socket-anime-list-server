@@ -1,6 +1,6 @@
 #define MAX_HTTP_SIZE 16384
 #define MAX_PARAMS 50
-#define CHUNK_SIZE 10
+#define CHUNK_SIZE 4096
 #define MAX_EVENTS 100
 #define URL_CHAR_LIMIT 2000
 #define API_URL "kitsu.io"
@@ -44,6 +44,13 @@ struct epoll_event ev, events[MAX_EVENTS];
 int epoll_fd;
 int fd_size = 1;
 
+enum conn_state {
+    TLS_HANDSHAKE,
+    READING,
+    PROCESSING,
+    WRITING,
+    CLOSING
+};
 // Rate limiting
 struct token_bucket {
     time_t last_updated;
@@ -69,6 +76,13 @@ typedef struct connection { // NOTE: Made to implement token bucket and pass pro
     uint16_t port; // NOTE: 2^16 = 65536 ports, including port 0
     struct ip_entry *entry_ptr;
     SSL *ssl;
+
+    char req[MAX_HTTP_SIZE];
+    size_t req_len;
+
+    size_t sent_len, sent;
+    char *buf;
+    enum conn_state state;
 } connection;
 
 // NOTE: 1 on success; 0 on failure
@@ -151,7 +165,7 @@ void close_conn(connection *conn) {
     fd_size--;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     if (conn->ssl) {
-        SSL_shutdown(conn->ssl);
+        //SSL_shutdown(conn->ssl);
         SSL_free(conn->ssl);
         conn->ssl = NULL;
     }
@@ -161,28 +175,67 @@ void close_conn(connection *conn) {
     conn = NULL;
 }
 
-void completely_send(connection *conn, const char *buf, const size_t len) {
-    if (!conn || !conn->ssl || (SSL_get_shutdown(conn->ssl) & SSL_RECEIVED_SHUTDOWN)) return;
-    size_t sent = 0, total = 0;
-    while (total < len) {
-        int status = SSL_write_ex(conn->ssl, &buf[total], len - total, &sent);
-        if (status > 0) {
-            total += sent;
+int read_request(connection *conn) {
+    size_t content_len = 0, header_len = 0;
+    while (1) {
+        size_t remaining = MAX_HTTP_SIZE - conn->req_len;
+        size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+        if (to_read <= 0 || (content_len > 0 && conn->req_len >= header_len + content_len)) break;
+
+        size_t received = 0;
+        int status = SSL_read_ex(conn->ssl, &conn->req[conn->req_len], to_read, &received);
+        if (status == 1) {
+            conn->req_len += received;
+
+            if (conn->req_len >= 4 && strstr(conn->req, "\r\n\r\n") != NULL) {
+                char *occ = NULL;
+                if (content_len == 0 && (occ = strcasestr(conn->req, "Content-Length: "))) {
+                    header_len = strlen(strstr(conn->req, "\r\n\r\n") - conn->req_len);
+                    char *num_str = malloc(1), *end;
+                    num_str[0] = '\0';
+
+                    int i = occ - conn->req + 16;
+                    while (conn->req[i] != '\r') {
+                        char add[2] = {conn->req[i], '\0'};
+                        heap_append(&num_str, add, strlen(num_str) + 2);
+                        i++;
+                    }
+
+                    content_len = strtol(num_str, &end, 10);
+                    if (*end == '\0' && end != num_str) {
+                        continue;
+                    }
+                }
+                return 1;
+            }
             continue;
         }
+
         int err_code = SSL_get_error(conn->ssl, status);
-        if (err_code == SSL_ERROR_WANT_READ) {
-            ev.events = EPOLLIN;
-            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
-            continue;
-        } else if (err_code == SSL_ERROR_WANT_WRITE) {
-            ev.events = EPOLLOUT;
-            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
-            continue;
-        }
-        close_conn(conn);
-        return;
+
+        if (err_code == SSL_ERROR_WANT_READ) return 0;
+        if (err_code == SSL_ERROR_WANT_WRITE) return -2;
+
+        return -1;
     }
+    if (conn->req_len <= 0 || strcmp(conn->req, "") == 0) {
+        return -1;
+    }
+    return 1;
+}
+
+
+void queue_response(connection *conn, char *buf, const size_t len) {
+    if (!conn || !conn->ssl || (SSL_get_shutdown(conn->ssl) & SSL_RECEIVED_SHUTDOWN) || conn->buf != NULL) return;
+    //conn->buf = strndup(buf, len);
+    conn->buf = buf;
+    conn->sent_len = len;
+    conn->sent = 0;
+    conn->state = WRITING;
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
+        .events = EPOLLOUT,
+        .data.ptr = conn
+    });
 }
 
 // NOTE: Must be freed
@@ -203,7 +256,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
     for (it = res; it != NULL; it = it->ai_next) {
         api_fd = socket(hints.ai_family, hints.ai_socktype, 0);
         if (api_fd == -1) continue;
-        if (connect(api_fd, res->ai_addr, res->ai_addrlen) != -1) break;
+        if (connect(api_fd, it->ai_addr, it->ai_addrlen) != -1) break;
         close(api_fd);
     }
     freeaddrinfo(res);
@@ -219,7 +272,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
         BIO *bio = BIO_new(BIO_s_socket());
         if (!bio) {
             err(__FILE__, __LINE__, NULL, 0);
-            SSL_shutdown(ssl);
+            //SSL_shutdown(ssl);
             SSL_free(ssl);
             BIO_free(bio);
             close(api_fd);
@@ -232,7 +285,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
 
         char *buf = malloc(1);
         if (!SSL_set1_host(ssl, host) || !SSL_set_tlsext_host_name(ssl, host) || SSL_connect(ssl) != 1 || !api_req || !buf) {
-            SSL_shutdown(ssl);
+            //SSL_shutdown(ssl);
             SSL_free(ssl);
             err(__FILE__, __LINE__, api_req, 0);
             free(buf);
@@ -265,7 +318,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
             buf = tmp;
             if (read == 0) break;
         }
-        SSL_shutdown(ssl);
+        //SSL_shutdown(ssl);
         SSL_free(ssl);
         close(api_fd);
         return buf;
@@ -355,16 +408,14 @@ void send_file_to(connection *conn, const char *name, const char *type, const in
     if (!sid || (sid && snprintf(set_cookie, sizeof(set_cookie), "Set-Cookie: session=%s; HttpOnly; SameSite=Lax; Secure", sid) < 0)) set_cookie[0] = '\0';
 
     char *res = http_res(buf, type, len, status, set_cookie);
+    free(buf);
     if (!res) {
-        err(__FILE__, __LINE__, buf, 0);
-        free(sid);
+        err(__FILE__, __LINE__, sid, 0);
         return;
     }
     int res_len = strncmp(type, "text", 4) == 0 ? strlen(res) : len + strlen(res);
-    for (int i = 0; i < (sid ? 2 : 1); i++) completely_send(conn, res, res_len); // NOTE: multiprint = temp workaround problem where epoll_wait hangs when HTTP req w/ set_session
+    for (int i = 0; i < (sid ? 2 : 1); i++) queue_response(conn, res, res_len); // NOTE: multiprint = temp workaround problem where epoll_wait hangs when HTTP req w/ set_session
     free(sid);
-    free(buf);
-    free(res);
 }
 
 // NOTE: Must be freed
@@ -537,33 +588,43 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     connection *conn = (connection *) arg;
     SSL *ssl = conn->ssl;
 
-    char r[MAX_HTTP_SIZE + 1];
-    r[0] = '\0';
+    char *r = conn->req;
 
     size_t bytes = 0, received = 0;
 
-    int status = -1;
-    while (1) {
-        size_t remaining = MAX_HTTP_SIZE - bytes;
-        size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
-        if (to_read <= 0) break;
-
-        int status = SSL_read_ex(ssl, &r[bytes], to_read, &received);
-        if (status > 0) {
-            bytes += received;
-            r[bytes] = '\0';
-            continue;
-        }
-        int err_code = SSL_get_error(ssl, status);
-        if (err_code == SSL_ERROR_WANT_READ || err_code == SSL_ERROR_WANT_WRITE) break;
-
-        close_conn(conn);
-        return NULL;
-    };
-    if (bytes <= 0) {
-        close_conn(conn);
-        return NULL;
-    }
+    // conn->state = READING;
+    // while (1) {
+    //     size_t remaining = MAX_HTTP_SIZE - conn->req_len;
+    //     size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+    //     if (to_read <= 0) break;
+    //
+    //     int status = SSL_read_ex(ssl, &r[conn->req_len], to_read, &received);
+    //     if (status > 0) {
+    //         conn->req_len += received;
+    //         r[conn->req_len] = '\0';
+    //         continue;
+    //     }
+    //     int err_code = SSL_get_error(ssl, status);
+    //     if (err_code == SSL_ERROR_WANT_READ) {
+    //         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+    //             .events = EPOLLIN,
+    //             .data.ptr = conn
+    //         });
+    //         return NULL;
+    //     } else if (err_code == SSL_ERROR_WANT_WRITE) {
+    //         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+    //             .events = EPOLLOUT,
+    //             .data.ptr = conn
+    //         });
+    //         return NULL;
+    //     }
+    //     close_conn(conn);
+    //     return NULL;
+    // };
+    // if (conn->req_len <= 0) {
+    //     close_conn(conn);
+    //     return NULL;
+    // }
     time_t now = time(NULL);
     conn->entry_ptr->last_connected = mktime(gmtime(&now));
 
@@ -1013,8 +1074,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_finalize(stmt);
                     sqlite3_close(db);
                     char *res = http_res("{\"success\": false}", "application/json", 20, 200, "");
-                    completely_send(conn, res, strlen(res));
-                    free(res);
+                    queue_response(conn, res, strlen(res));
                     goto done;
                 }
                 sqlite3_finalize(stmt);
@@ -1048,8 +1108,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
-                    completely_send(conn, res, strlen(res));
-                    free(res);
+                    queue_response(conn, res, strlen(res));
                     goto done;
                 }
 
@@ -1057,8 +1116,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
-                completely_send(conn, res, strlen(res));
-                free(res);
+                queue_response(conn, res, strlen(res));
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "DELETE ", 7) == 0) {
@@ -1082,16 +1140,14 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
-                    completely_send(conn, res, strlen(res));
-                    free(res);
+                    queue_response(conn, res, strlen(res));
                     goto done;
                 }
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
-                completely_send(conn, res, strlen(res));
-                free(res);
+                queue_response(conn, res, strlen(res));
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else if (strncmp(r, "PATCH", 5) == 0) {
@@ -1118,16 +1174,14 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                     sqlite3_close(db);
 
                     char *res = http_res("{\"success\": false}", "application/json", 18, 200, "");
-                    completely_send(conn, res, strlen(res));
-                    free(res);
+                    queue_response(conn, res, strlen(res));
                     goto done;
                 }
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
 
                 char *res = http_res("{\"success\": true}", "application/json", 17, 200, "");
-                completely_send(conn, res, strlen(res));
-                free(res);
+                queue_response(conn, res, strlen(res));
             } else send_file_to(conn, "401.html", NULL, num_params, params);
         } else send_file_to(conn, "404.html", NULL, num_params, params);
     } else send_file_to(conn, "404.html", NULL, num_params, params);
@@ -1236,43 +1290,72 @@ int main(void) {
         for (int i = 0; i < wait; i++) {
             if (events[i].data.fd == server_fd) {
                 int cli = accept(server_fd, (struct sockaddr *) &ip_port, &t);
-                SSL *ssl = SSL_new(sctx);
-                if (cli == -1 || !ssl) {
+                if (cli == -1) {
                     err(__FILE__, __LINE__, NULL, 0);
-                    close(cli);
-                    if (ssl) {
-                        SSL_shutdown(ssl);
-                        SSL_free(ssl);
-                        ssl = NULL;
-                    }
-                    if (cli == -1 && errno == EAGAIN) break;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                     sleep(1);
                     continue;
                 }
+                fcntl(cli, F_SETFL, O_NONBLOCK);
+
+                SSL *ssl = SSL_new(sctx);
+                if (!ssl) {
+                    close(cli);
+                    continue;
+                }
+
                 SSL_set_fd(ssl, cli);
 
-                struct connection *c = malloc(sizeof(connection));
+                struct connection *c = calloc(1, sizeof(connection));
                 int acc = 0, cancel_cli = 0;
 
+                if (!c) {
+                    err(__FILE__, __LINE__, NULL, 0);
+                    close(cli);
+                    //SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                    ssl = NULL;
+                    continue;
+                }
+
+                c->state = TLS_HANDSHAKE;
+                c->fd = cli;
+                c->ssl = ssl;
+
+                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cli, &(struct epoll_event) {
+                    .events = EPOLLIN,
+                    .data.ptr = c
+                });
+                int cont = 0;
                 while ((acc = SSL_accept(ssl)) <= 0) {
                     int error_code = SSL_get_error(ssl, acc);
-                    if (error_code == SSL_ERROR_WANT_READ || error_code == SSL_ERROR_WANT_WRITE) {
-                        continue;
+                    if (error_code == SSL_ERROR_WANT_READ) {
+                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cli, &(struct epoll_event){
+                            .events = EPOLLIN,
+                            .data.ptr = c
+                        });
+                        //cont = 1;
+                        break;
+                    } else if (error_code == SSL_ERROR_WANT_WRITE) {
+                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cli, &(struct epoll_event){
+                            .events = EPOLLOUT,
+                            .data.ptr = c
+                        });
+                        //cont = 1;
+                        break;
                     } else {
                         cancel_cli = 1;
                         break;
                     }
                 }
-                fcntl(cli, F_SETFL, O_NONBLOCK);
-                if (cancel_cli || !c) {
-                    if (!cancel_cli) err(__FILE__, __LINE__, NULL, 0);
+                if (cont) continue;
+                if (cancel_cli) {
                     close(cli);
-                    SSL_shutdown(ssl);
+                    //SSL_shutdown(ssl);
                     SSL_free(ssl);
                     ssl = NULL;
                     continue;
                 }
-                c->fd = cli;
 
                 struct sockaddr_in client_addr;
                 socklen_t size = sizeof(struct sockaddr_in);
@@ -1316,23 +1399,92 @@ int main(void) {
                     ip_entries[ips++] = entry;
                 }
                 c->entry_ptr = entry;
-                c->ssl = ssl;
                 c->port = ntohs(client_addr.sin_port);
 
-                ev.events = EPOLLIN;
-                ev.data.ptr = c;
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cli, &ev) < 0) {
-                    err(__FILE__, __LINE__, NULL, 0);
-                    close(cli);
-                    continue;
-                }
+                c->req[0] = '\0';
+                c->req_len = 0;
+                c->buf = NULL;
+                c->state = READING;
+
                 fd_size++;
                 entry->active_connections++;
             } else {
-                if (events[i].data.ptr && (connection *) events[i].data.ptr) {
-                    pthread_mutex_lock(&lock);
-                    handle(events[i].data.ptr);
-                    pthread_mutex_unlock(&lock);
+                connection *conn = NULL;
+                if (events[i].data.ptr && (conn = (connection *) events[i].data.ptr)) {
+                    if (events[i].events & EPOLLIN) {
+                        int result = read_request(conn);
+
+                        if (result == 0) {
+                            // Need more network data.
+                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
+                                .events = EPOLLIN,
+                                .data.ptr = conn
+                            });
+                            continue;
+                        }
+
+                        if (result == -2) {
+                            // TLS needs to write.
+                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
+                                .events = EPOLLOUT,
+                                .data.ptr = conn
+                            });
+                            continue;
+                        }
+
+                        if (result < 0) {
+                            close_conn(conn);
+                            continue;
+                        }
+                        conn->state = PROCESSING;
+                        handle(events[i].data.ptr);
+                        continue;
+                    }
+                    if (events[i].events & EPOLLOUT) {
+                        size_t sent = 0;
+                        int cont = 0;
+                        while (conn->sent < conn->sent_len) {
+                            int status = SSL_write_ex(conn->ssl, &conn->buf[conn->sent], conn->sent_len - conn->sent, &sent);
+                            if (status > 0) {
+                                conn->sent += sent;
+                                continue;
+                            }
+                            int err_code = SSL_get_error(conn->ssl, status);
+                            if (err_code == SSL_ERROR_WANT_READ) {
+                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    .events = EPOLLIN,
+                                    .data.ptr = conn
+                                });
+                                cont = 1;
+                                break;
+                            } else if (err_code == SSL_ERROR_WANT_WRITE) {
+                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    .events = EPOLLOUT,
+                                    .data.ptr = conn
+                                });
+                                cont = 1;
+                                break;
+                            }
+                            cont = 1;
+                            close_conn(conn);
+                            break;
+                        }
+                        if (cont) continue;
+                        free(conn->buf);
+                        conn->buf = NULL;
+                        conn->sent_len = 0;
+                        conn->sent = 0;
+                        conn->state = READING;
+                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                            .events = EPOLLIN,
+                            .data.ptr = conn
+                        });
+                        conn->req_len = 0;
+                        memset(conn->req, '\0', sizeof(conn->req));
+                    }
+                    //pthread_mutex_lock(&lock);
+                    //handle(events[i].data.ptr);
+                    //pthread_mutex_unlock(&lock);
                 }
             }
         }

@@ -1,5 +1,9 @@
 {% extends "layout.html" %}
 
+{% block additional_head %}
+<script src="search.js" defer></script>
+{% endblock %}
+
 {% block main %}
     {% if trending and #trending.data > 0 %}
         <p class="text-3xl text-black dark:text-white ml-6 mt-6">Top Trending Anime</p>
