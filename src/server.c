@@ -47,9 +47,7 @@ int fd_size = 1;
 enum conn_state {
     TLS_HANDSHAKE,
     READING,
-    PROCESSING,
     WRITING,
-    CLOSING
 };
 // Rate limiting
 struct token_bucket {
@@ -1411,80 +1409,77 @@ int main(void) {
             } else {
                 connection *conn = NULL;
                 if (events[i].data.ptr && (conn = (connection *) events[i].data.ptr)) {
-                    if (events[i].events & EPOLLIN) {
-                        int result = read_request(conn);
-
-                        if (result == 0) {
-                            // Need more network data.
-                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
-                                .events = EPOLLIN,
-                                .data.ptr = conn
-                            });
-                            continue;
-                        }
-
-                        if (result == -2) {
-                            // TLS needs to write.
-                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
-                                .events = EPOLLOUT,
-                                .data.ptr = conn
-                            });
-                            continue;
-                        }
-
-                        if (result < 0) {
-                            close_conn(conn);
-                            continue;
-                        }
-                        conn->state = PROCESSING;
-                        handle(events[i].data.ptr);
-                        continue;
-                    }
-                    if (events[i].events & EPOLLOUT) {
-                        size_t sent = 0;
-                        int cont = 0;
-                        while (conn->sent < conn->sent_len) {
-                            int status = SSL_write_ex(conn->ssl, &conn->buf[conn->sent], conn->sent_len - conn->sent, &sent);
-                            if (status > 0) {
-                                conn->sent += sent;
-                                continue;
-                            }
-                            int err_code = SSL_get_error(conn->ssl, status);
-                            if (err_code == SSL_ERROR_WANT_READ) {
-                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                    switch (conn->state) {
+                        case TLS_HANDSHAKE:
+                            break;
+                        case READING:
+                            int result = read_request(conn);
+                            if (result == 0) {
+                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                     .events = EPOLLIN,
                                     .data.ptr = conn
                                 });
-                                cont = 1;
                                 break;
-                            } else if (err_code == SSL_ERROR_WANT_WRITE) {
-                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                            }
+
+                            if (result == -2) {
+                                epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                     .events = EPOLLOUT,
                                     .data.ptr = conn
                                 });
-                                cont = 1;
                                 break;
                             }
-                            cont = 1;
-                            close_conn(conn);
+
+                            if (result < 0) {
+                                close_conn(conn);
+                                break;
+                            }
+                            handle(events[i].data.ptr);
                             break;
-                        }
-                        if (cont) continue;
-                        free(conn->buf);
-                        conn->buf = NULL;
-                        conn->sent_len = 0;
-                        conn->sent = 0;
-                        conn->state = READING;
-                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
-                            .events = EPOLLIN,
-                            .data.ptr = conn
-                        });
-                        conn->req_len = 0;
-                        memset(conn->req, '\0', sizeof(conn->req));
+                        case WRITING:
+                            size_t sent = 0;
+                            int exit = 0;
+                            while (conn->sent < conn->sent_len) {
+                                int status = SSL_write_ex(conn->ssl, &conn->buf[conn->sent], conn->sent_len - conn->sent, &sent);
+                                if (status > 0) {
+                                    conn->sent += sent;
+                                    continue;
+                                }
+
+                                int err_code = SSL_get_error(conn->ssl, status);
+                                if (err_code == SSL_ERROR_WANT_READ) {
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                        .events = EPOLLIN,
+                                        .data.ptr = conn
+                                    });
+                                    exit = 1;
+                                    break;
+                                } else if (err_code == SSL_ERROR_WANT_WRITE) {
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                        .events = EPOLLOUT,
+                                        .data.ptr = conn
+                                    });
+                                    exit = 1;
+                                    break;
+                                }
+                                exit = 1;
+                                close_conn(conn);
+                                break;
+                            }
+                            if (exit) break;
+                            free(conn->buf);
+                            conn->buf = NULL;
+                            conn->sent_len = 0;
+                            conn->sent = 0;
+                            conn->state = READING;
+                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                .events = EPOLLIN,
+                                .data.ptr = conn
+                            });
+                            conn->req_len = 0;
+                            memset(conn->req, '\0', sizeof(conn->req));
+                            break;
                     }
-                    //pthread_mutex_lock(&lock);
-                    //handle(events[i].data.ptr);
-                    //pthread_mutex_unlock(&lock);
                 }
             }
         }
