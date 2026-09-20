@@ -270,7 +270,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
         BIO *bio = BIO_new(BIO_s_socket());
         if (!bio) {
             err(__FILE__, __LINE__, NULL, 0);
-            //SSL_shutdown(ssl);
+            SSL_shutdown(ssl);
             SSL_free(ssl);
             BIO_free(bio);
             close(api_fd);
@@ -283,7 +283,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
 
         char *buf = malloc(1);
         if (!SSL_set1_host(ssl, host) || !SSL_set_tlsext_host_name(ssl, host) || SSL_connect(ssl) != 1 || !api_req || !buf) {
-            //SSL_shutdown(ssl);
+            SSL_shutdown(ssl);
             SSL_free(ssl);
             err(__FILE__, __LINE__, api_req, 0);
             free(buf);
@@ -297,7 +297,6 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
 
         int read_total = 0;
         while (1) {
-            //printf("buf: %s\nnew size: %i\n", buf, read_total + CHUNK_SIZE + 1);
             char *tmp = realloc(buf, read_total + CHUNK_SIZE + 1);
             if (!tmp) {
                 free(buf);
@@ -316,7 +315,7 @@ char *recv_https_from_req(const char *path, const char *host, const char *type, 
             buf = tmp;
             if (read == 0) break;
         }
-        //SSL_shutdown(ssl);
+        SSL_shutdown(ssl);
         SSL_free(ssl);
         close(api_fd);
         return buf;
@@ -588,41 +587,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
 
     char *r = conn->req;
 
-    size_t bytes = 0, received = 0;
-
-    // conn->state = READING;
-    // while (1) {
-    //     size_t remaining = MAX_HTTP_SIZE - conn->req_len;
-    //     size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
-    //     if (to_read <= 0) break;
-    //
-    //     int status = SSL_read_ex(ssl, &r[conn->req_len], to_read, &received);
-    //     if (status > 0) {
-    //         conn->req_len += received;
-    //         r[conn->req_len] = '\0';
-    //         continue;
-    //     }
-    //     int err_code = SSL_get_error(ssl, status);
-    //     if (err_code == SSL_ERROR_WANT_READ) {
-    //         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
-    //             .events = EPOLLIN,
-    //             .data.ptr = conn
-    //         });
-    //         return NULL;
-    //     } else if (err_code == SSL_ERROR_WANT_WRITE) {
-    //         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
-    //             .events = EPOLLOUT,
-    //             .data.ptr = conn
-    //         });
-    //         return NULL;
-    //     }
-    //     close_conn(conn);
-    //     return NULL;
-    // };
-    // if (conn->req_len <= 0) {
-    //     close_conn(conn);
-    //     return NULL;
-    // }
     time_t now = time(NULL);
     conn->entry_ptr->last_connected = mktime(gmtime(&now));
 
@@ -1305,12 +1269,12 @@ int main(void) {
                 SSL_set_fd(ssl, cli);
 
                 struct connection *c = calloc(1, sizeof(connection));
-                int acc = 0, cancel_cli = 0;
+                int cancel_cli = 0;
 
                 if (!c) {
                     err(__FILE__, __LINE__, NULL, 0);
                     close(cli);
-                    //SSL_shutdown(ssl);
+                    SSL_shutdown(ssl);
                     SSL_free(ssl);
                     ssl = NULL;
                     continue;
@@ -1324,36 +1288,6 @@ int main(void) {
                     .events = EPOLLIN,
                     .data.ptr = c
                 });
-                int cont = 0;
-                while ((acc = SSL_accept(ssl)) <= 0) {
-                    int error_code = SSL_get_error(ssl, acc);
-                    if (error_code == SSL_ERROR_WANT_READ) {
-                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cli, &(struct epoll_event){
-                            .events = EPOLLIN,
-                            .data.ptr = c
-                        });
-                        //cont = 1;
-                        break;
-                    } else if (error_code == SSL_ERROR_WANT_WRITE) {
-                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, cli, &(struct epoll_event){
-                            .events = EPOLLOUT,
-                            .data.ptr = c
-                        });
-                        //cont = 1;
-                        break;
-                    } else {
-                        cancel_cli = 1;
-                        break;
-                    }
-                }
-                if (cont) continue;
-                if (cancel_cli) {
-                    close(cli);
-                    //SSL_shutdown(ssl);
-                    SSL_free(ssl);
-                    ssl = NULL;
-                    continue;
-                }
 
                 struct sockaddr_in client_addr;
                 socklen_t size = sizeof(struct sockaddr_in);
@@ -1402,7 +1336,6 @@ int main(void) {
                 c->req[0] = '\0';
                 c->req_len = 0;
                 c->buf = NULL;
-                c->state = READING;
 
                 fd_size++;
                 entry->active_connections++;
@@ -1411,6 +1344,27 @@ int main(void) {
                 if (events[i].data.ptr && (conn = (connection *) events[i].data.ptr)) {
                     switch (conn->state) {
                         case TLS_HANDSHAKE:
+                            int acc = 0;
+                            while ((acc = SSL_accept(conn->ssl)) <= 0) {
+                                int error_code = SSL_get_error(conn->ssl, acc);
+                                if (error_code == SSL_ERROR_WANT_READ) {
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                        .events = EPOLLIN,
+                                        .data.ptr = conn
+                                    });
+                                    break;
+                                } else if (error_code == SSL_ERROR_WANT_WRITE) {
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                        .events = EPOLLOUT,
+                                        .data.ptr = conn
+                                    });
+                                    break;
+                                } else {
+                                    close_conn(conn);
+                                    break;
+                                }
+                            }
+                            if (acc > 0) conn->state = READING;
                             break;
                         case READING:
                             int result = read_request(conn);
