@@ -182,6 +182,7 @@ int read_request(connection *conn) {
 
         size_t received = 0;
         int status = SSL_read_ex(conn->ssl, &conn->req[conn->req_len], to_read, &received);
+        printf("%s", &conn->req[conn->req_len]);
         if (status == 1) {
             conn->req_len += received;
 
@@ -201,6 +202,8 @@ int read_request(connection *conn) {
 
                     content_len = strtol(num_str, &end, 10);
                     if (*end == '\0' && end != num_str) {
+                        if (content_len <= 0)
+                            return 1;
                         continue;
                     }
                 }
@@ -840,6 +843,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     } else if (strncmp(r, "POST ", 5) == 0) {
         char *sep = strstr(r, "\r\n\r\n");
         char *post_body = sep ? sep + 4 : NULL;
+        printf("%s\n", r);
         // TODO: How should post & other req method errs be handled? What should they return?
         if (post_body && strcmp(post_body, "") != 0) {
             url_query_into_arr_pairs(post_body, &num_params, params);
@@ -1047,7 +1051,7 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
                 safely_update_into_arr_pair("set_session", "", &set_ses_pair_len, set_session, 1);
 
                 goto_index_html(conn, 1, set_session, uid);
-                goto_index_html(conn, num_params, params, -1);
+                goto_index_html(conn, num_params, params, uid);
 
                 free(set_session[0].key);
                 free(set_session[0].value);
