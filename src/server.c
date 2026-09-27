@@ -843,7 +843,6 @@ void *handle(void *arg) { // NOTE: arg = connection * of client data ptr
     } else if (strncmp(r, "POST ", 5) == 0) {
         char *sep = strstr(r, "\r\n\r\n");
         char *post_body = sep ? sep + 4 : NULL;
-        printf("%s\n", r);
         // TODO: How should post & other req method errs be handled? What should they return?
         if (post_body && strcmp(post_body, "") != 0) {
             url_query_into_arr_pairs(post_body, &num_params, params);
@@ -1352,13 +1351,13 @@ int main(void) {
                             while ((acc = SSL_accept(conn->ssl)) <= 0) {
                                 int error_code = SSL_get_error(conn->ssl, acc);
                                 if (error_code == SSL_ERROR_WANT_READ) {
-                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                         .events = EPOLLIN,
                                         .data.ptr = conn
                                     });
                                     break;
                                 } else if (error_code == SSL_ERROR_WANT_WRITE) {
-                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                         .events = EPOLLOUT,
                                         .data.ptr = conn
                                     });
@@ -1406,14 +1405,14 @@ int main(void) {
 
                                 int err_code = SSL_get_error(conn->ssl, status);
                                 if (err_code == SSL_ERROR_WANT_READ) {
-                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                         .events = EPOLLIN,
                                         .data.ptr = conn
                                     });
                                     exit = 1;
                                     break;
                                 } else if (err_code == SSL_ERROR_WANT_WRITE) {
-                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                         .events = EPOLLOUT,
                                         .data.ptr = conn
                                     });
@@ -1430,7 +1429,7 @@ int main(void) {
                             conn->sent_len = 0;
                             conn->sent = 0;
                             conn->state = READING;
-                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event){
+                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &(struct epoll_event) {
                                 .events = EPOLLIN,
                                 .data.ptr = conn
                             });
