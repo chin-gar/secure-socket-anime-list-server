@@ -957,6 +957,7 @@ char *rendered_template(const char *html_buf, int param_count, pair *params) {
     if (parse_node_tree(doc, html_buf, &extends_from) < 1) { // NOTE: Mainly to add the blocks into the blocks array first (if inheriting)
         free_node_tree(doc);
         free(blocks);
+        blocks = NULL;
         free(extends_from);
         return strdup(html_buf);
     }
@@ -968,6 +969,7 @@ char *rendered_template(const char *html_buf, int param_count, pair *params) {
         if (!ext || snprintf(path, sizeof(path), "../frontend/%s", extends_from) < 0 || !(f = fopen(path, "r"))) {
             free_node_tree(doc);
             free(blocks);
+            blocks = NULL;
             free(new_buf);
             err(__FILE__, __LINE__, ext, 0);
             return strdup(html_buf);
@@ -981,7 +983,8 @@ char *rendered_template(const char *html_buf, int param_count, pair *params) {
 
         if (parse_node_tree(ext, ext_buf, &extends_from) < 1) {
             free_node_tree(doc);
-            free(blocks);
+            free(blocks);;
+            blocks = NULL;
             free(new_buf);
             err(__FILE__, __LINE__, ext, 0);
             return strdup(html_buf);
@@ -993,6 +996,7 @@ char *rendered_template(const char *html_buf, int param_count, pair *params) {
     free(extends_from);
     free_node_tree(doc);
     free(blocks);
+    blocks = NULL;
     num_blocks = 0;
     return new_buf;
 }

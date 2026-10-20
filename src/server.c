@@ -75,7 +75,7 @@ typedef struct connection { // NOTE: Made to implement token bucket and pass pro
     struct ip_entry *entry_ptr;
     SSL *ssl;
 
-    char req[MAX_HTTP_SIZE];
+    char req[MAX_HTTP_SIZE + 1];
     size_t req_len;
 
     size_t sent_len, sent;
@@ -175,6 +175,7 @@ void close_conn(connection *conn) {
 
 int read_request(connection *conn) {
     size_t content_len = 0, header_len = 0;
+    int has_content_len = 0;
     while (1) {
         size_t remaining = MAX_HTTP_SIZE - conn->req_len;
         size_t to_read = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
@@ -182,14 +183,16 @@ int read_request(connection *conn) {
 
         size_t received = 0;
         int status = SSL_read_ex(conn->ssl, &conn->req[conn->req_len], to_read, &received);
-        printf("%s", &conn->req[conn->req_len]);
         if (status == 1) {
             conn->req_len += received;
+            conn->req[conn->req_len] = '\0';
 
             if (conn->req_len >= 4 && strstr(conn->req, "\r\n\r\n") != NULL) {
                 char *occ = NULL;
-                if (content_len == 0 && (occ = strcasestr(conn->req, "Content-Length: "))) {
-                    header_len = strlen(strstr(conn->req, "\r\n\r\n") - conn->req_len);
+                if (!has_content_len && (occ = strcasestr(conn->req, "Content-Length: "))) {
+                    char *header_end = strstr(conn->req, "\r\n\r\n");
+                    header_len = (header_end - conn->req) + 4;
+
                     char *num_str = malloc(1), *end;
                     num_str[0] = '\0';
 
@@ -201,12 +204,14 @@ int read_request(connection *conn) {
                     }
 
                     content_len = strtol(num_str, &end, 10);
+                    has_content_len = 1;
                     if (*end == '\0' && end != num_str) {
                         if (content_len <= 0)
                             return 1;
                         continue;
                     }
                 }
+                if (has_content_len && conn->req_len < header_len + content_len) continue;
                 return 1;
             }
             continue;
@@ -228,7 +233,6 @@ int read_request(connection *conn) {
 
 void queue_response(connection *conn, char *buf, const size_t len) {
     if (!conn || !conn->ssl || (SSL_get_shutdown(conn->ssl) & SSL_RECEIVED_SHUTDOWN) || conn->buf != NULL) return;
-    //conn->buf = strndup(buf, len);
     conn->buf = buf;
     conn->sent_len = len;
     conn->sent = 0;
@@ -339,10 +343,12 @@ char *http_res(const void *body, const char *type, const int content_len, int st
         return NULL;
     }
 
-    int h_len = 21 + strlen(c_len_str) + strlen(c_type_str) + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 0);
+    const char *csp = "Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; img-src 'self' https://media.kitsu.app; object-src 'none'; base-uri 'self'";
+
+    int h_len = 21 + 31 + 2 + strlen(c_len_str) + strlen(c_type_str) + strlen(csp) + 2 + strlen(more_header_info) + (strlen(more_header_info) > 0 ? 2 : 0);
     int res_size = h_len + content_len + 1;
     char *res = malloc(res_size);
-    if (!res || snprintf(res, h_len, "HTTP/1.1 %i\r\n%s\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str, more_header_info) < 0 || (strlen(more_header_info) > 0 && snprintf(res + strlen(res), 3, "\r\n") < 0)) {
+    if (!res || snprintf(res, h_len, "HTTP/1.1 %i\r\n%s\r\n%s\r\nX-Content-Type-Options: nosniff\r\n%s\r\n%s\r\n", status, c_type_str, c_len_str, csp, more_header_info) < 0 || (strlen(more_header_info) > 0 && snprintf(res + strlen(res), 3, "\r\n") < 0)) {
         err(__FILE__, __LINE__, NULL, 0);
         return NULL;
     }
@@ -535,7 +541,12 @@ void *rm_expired_sessions(void *arg) { // NOTE: arg = ip_entry[]
             if (ip_entries[i]->active_connections <= 0 && difftime(mktime(gmtime(&now)), ip_entries[i]->last_connected) / 60 >= 30) {
                 free(ip_entries[i]->ip);
                 (*(params->num_ips_ptr))--;
-                memmove(&ip_entries[i], &ip_entries[i + 1], sizeof(*ip_entries) * (n - i - 1));
+                n = *(params->num_ips_ptr);
+                if (n <= 0) { // NOTE: If no IPs, given size is only one entry
+                    memset(ip_entries, 0, sizeof(*ip_entries));
+                    break;
+                } else
+                    memmove(&ip_entries[i], &ip_entries[i + 1], sizeof(*ip_entries) * (n - i - 1));
                 i--;
             }
         }

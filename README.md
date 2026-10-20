@@ -44,6 +44,8 @@ As for the template engine, I just couldn't find a C HTML template engine that w
 - IP-based rate limiting using the Token Bucket Algorithm and a resizable array of unique IPs stored in the server's memory &rarr; mitigate request spamming & resource exhaustion (haven't tested w/ multiple clients yet)
 - Limiting user input of URLs to 2000 characters, 300 for anime title queries to reduce external Kitsu.io API calls
 - Checking for and displaying different HTTP error codes as HTML pages (ex. 404 Not Found page)
+- Content-Security-Policy on every HTTP response for only allowing trusted srcs to load content (most modern browsers should enforce this)
+    - Used 'unsafe-inline' on style-src to allow Tailwind CDN to deliver styles and on script-src temporarily; AVOID USING IN PRODUCTION
 
 # Installation
 
